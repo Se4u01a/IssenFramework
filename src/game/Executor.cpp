@@ -767,6 +767,19 @@ namespace issen::game::executor
 			return weapon ? static_cast<float>(weapon->GetAttackDamage()) : 0.0f;
 		}
 
+		// Papyrus StartDeferredKill: the actor does not die at 0 health until its script calls EndDeferredKill (STB's draugr
+		// and chaurus get up again once, vampires and werewolves cheat death). Forcing the kill there broke them: a kneeling
+		// actor that got up again, or a corpse the script then reanimated.
+		bool InDeferredKill(RE::Actor* actor)
+		{
+			const auto* process = actor->GetActorRuntimeData().currentProcess;
+			return process && process->middleHigh && process->middleHigh->inDeferredKill;
+		}
+
+		// How long an enemy in a deferred kill is watched for its script to let it die (it polls in game seconds, slowed
+		// down by the issen's slow motion).
+		constexpr float kDeferredKillWatchTime = 6.0f;
+
 		void AddNodeIfPresent(std::vector<rules::NodeWeight>& list, RE::NiAVObject* root, const std::string& node, float weight = 1.0f)
 		{
 			if (!root || !root->GetObjectByName(node)) {
@@ -781,6 +794,12 @@ namespace issen::game::executor
 		void Dismember(RE::PlayerCharacter* player, RE::Actor* target, const rules::Rule& rule, StrikeCut cut)
 		{
 			const auto& d = rule.outcome.dismember;
+			// Only the really dead: a cut on one that gets up again (a deferred kill, a resurrection) leaves it broken.
+			if (!target->IsDead() || InDeferredKill(target)) {
+				logger::info("issen: no dismemberment of {:08X}: not dead ({}deferred kill)", target->GetFormID(),
+					InDeferredKill(target) ? "" : "no ");
+				return;
+			}
 			if (!Settings::Get().dismember || !d.enabled || !g_dfBound || !DismemberingFrameworkAPI::g_API) {
 				return;
 			}
@@ -955,6 +974,13 @@ namespace issen::game::executor
 		{
 			auto*       av = target->AsActorValueOwner();
 			const float health = av->GetActorValue(RE::ActorValue::kHealth);
+			if (InDeferredKill(target)) {
+				// Down to 0 health: what the actor's own script does with that (get up, or die) is up to it.
+				if (health > 0.0f) {
+					av->DamageActorValue(RE::ActorValue::kHealth, health + 10.0f);
+				}
+				return false;
+			}
 			target->KillImpl(player, std::max(health, 1.0f), true, false);
 			if (!target->IsDead()) {
 				av->DamageActorValue(RE::ActorValue::kHealth, health + 10.0f);
@@ -1007,6 +1033,15 @@ namespace issen::game::executor
 					it = g_deaths.erase(it);
 					continue;
 				}
+				if (d.killed && InDeferredKill(target)) {
+					// Its script decides: it gets up again (no dismemberment), or ends the deferred kill and dies (cut then).
+					logger::info("issen: {:08X} is in a deferred kill (health {:.0f}): left to its script, dismembered only if it dies",
+						target->GetFormID(), av->GetActorValue(RE::ActorValue::kHealth));
+					SetDoomed(d.target, false);
+					g_sideEffectWatches.push_back({ d.target, d.rule, kDeferredKillWatchTime, d.cut });
+					it = g_deaths.erase(it);
+					continue;
+				}
 				d.verifyLeft -= dt;
 				if (d.verifyLeft > 0.0f) {
 					++it;
@@ -1017,9 +1052,9 @@ namespace issen::game::executor
 					++it;
 					continue;
 				}
-				logger::info("issen: {:08X} NOT killed after {} tries (health {:.0f}, essential {}, protected {}, in kill move {}, race {})",
+				logger::info("issen: {:08X} NOT killed after {} tries (health {:.0f}, essential {}, protected {}, in kill move {}, deferred kill {}, race {})",
 					target->GetFormID(), d.tries, av->GetActorValue(RE::ActorValue::kHealth), target->IsEssential(), target->IsProtected(),
-					target->IsInKillMove(), target->GetRace() ? target->GetRace()->GetFormEditorID() : "?");
+					target->IsInKillMove(), InDeferredKill(target), target->GetRace() ? target->GetRace()->GetFormEditorID() : "?");
 				SetDoomed(d.target, false);
 				it = g_deaths.erase(it);
 			}
