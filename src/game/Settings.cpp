@@ -127,6 +127,9 @@ namespace issen::game
 		s.dismember = ReadBool("Execute", "bDismember", s.dismember);
 
 		s.animEvent = ReadString("Animation", "sEvent", s.animEvent);
+		if (s.animEvent == "attackPowerStartRight 0 0, attackPowerStartInPlace -90 0") {
+			s.animEvent = "attackPowerStartRight 0 0, attackPowerStartLeft 0 0, attackPowerStartInPlace -90 0";
+		}
 		s.animStopFirst = ReadBool("Animation", "bStopFirst", s.animStopFirst);
 		s.animSpeed = ReadFloat("Animation", "fSpeed", s.animSpeed, 0.1f, 10.0f);
 		s.animSpeedAfterDash = ReadFloat("Animation", "fSpeedAfterDash", s.animSpeedAfterDash, 0.1f, 10.0f);

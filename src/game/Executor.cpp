@@ -7,13 +7,16 @@
 #include "ReactiveDodgeAPI.h"
 #include "Settings.h"
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <mutex>
 #include <numbers>
 #include <random>
 #include <sstream>
+#include <string_view>
 #include <vector>
 
 namespace issen::game::executor
@@ -22,6 +25,15 @@ namespace issen::game::executor
 
 	namespace
 	{
+		// How the chosen strike animation maps to Dismembering Framework nodes:
+		// - Side power attacks (left / right) cut horizontally and always decapitate (HeadOnly).
+		// - Standing / normal power attacks play any dismemberment animation from the enemy's pool (AnyFromPool).
+		enum class StrikeCut : std::uint8_t
+		{
+			AnyFromPool,
+			HeadOnly,
+		};
+
 		struct Request
 		{
 			std::uint32_t      target;
@@ -46,8 +58,9 @@ namespace issen::game::executor
 		{
 			std::uint32_t      target;
 			const rules::Rule* rule;
-			float              delay;     // player seconds left
+			float              delay;       // player seconds left
 			bool               onHitFrame;  // strike as soon as the player's clip reaches its HitFrame
+			StrikeCut          cut{ StrikeCut::AnyFromPool };
 		};
 
 		// The player's HitFrame annotations (graph event sink, main thread).
@@ -76,15 +89,19 @@ namespace issen::game::executor
 		GraphSink g_graphSink;
 		float     g_traceLeft{ 0.0f };
 
+		// [Dev] bDevLog: the player's yaw, the camera's yaw and the distance to the enemy, every frame of an issen.
+		float         g_poseLeft{ 0.0f };
+		std::uint32_t g_poseTarget{ 0 };
+
 		float g_speedLeft{ 0.0f };     // player seconds the strike speed is still held
 		bool  g_speedRestore{ false }; // write the normal speed back once
 		float g_speedDelta{ 0.0f };    // our temporary WeaponSpeedMult modifier on the player (taken off before a save)
 
-		std::mutex              g_requestLock;
-		std::vector<Request>    g_requests;     // any thread -> main thread
-		std::vector<CueRequest> g_cueRequests;  // any thread -> main thread
-		std::vector<CueCooldown> g_cueCooldowns; // main thread
-		std::vector<Strike>     g_strikes;      // main thread
+		std::mutex               g_requestLock;
+		std::vector<Request>     g_requests;      // any thread -> main thread
+		std::vector<CueRequest>  g_cueRequests;   // any thread -> main thread
+		std::vector<CueCooldown> g_cueCooldowns;  // main thread
+		std::vector<Strike>      g_strikes;       // main thread
 
 		// The part before the strike (main thread).
 		enum class Phase : std::uint8_t
@@ -116,8 +133,9 @@ namespace issen::game::executor
 			bool               killed{ false };
 			float              verifyLeft{ 0.0f };
 			int                tries{ 0 };
+			StrikeCut          cut{ StrikeCut::AnyFromPool };
 		};
-		std::vector<Death>         g_deaths;
+		std::vector<Death> g_deaths;
 
 		// Short post-strike watch for non-kill verdicts: if an asynchronous hit side effect (enchantment ActiveEffect,
 		// poison, bleeding perk, OnHit script) finishes the enemy off right after the strike, still dismember.
@@ -126,17 +144,18 @@ namespace issen::game::executor
 			std::uint32_t      target;
 			const rules::Rule* rule;
 			float              timeLeft;
+			StrikeCut          cut{ StrikeCut::AnyFromPool };
 		};
 		constexpr float              kSideEffectWatchTime = 1.5f;
 		std::vector<SideEffectWatch> g_sideEffectWatches;
 
-		bool                       g_sheatheAfterCombat{ false };  // an issen killed: sheathe once the combat is over
-		float                      g_outOfCombat{ 0.0f };          // seconds the player has been out of combat
+		bool  g_sheatheAfterCombat{ false };  // an issen killed: sheathe once the combat is over
+		float g_outOfCombat{ 0.0f };          // seconds the player has been out of combat
 
 		// The player held where the strike began (its clip would carry it sideways).
-		bool         g_lock{ false };
-		RE::NiPoint3 g_lockAt{};
-		float        g_lockAfter{ 0.0f };  // player seconds the lock still lasts once no strike is pending
+		bool                       g_lock{ false };
+		RE::NiPoint3               g_lockAt{};
+		float                      g_lockAfter{ 0.0f };  // player seconds the lock still lasts once no strike is pending
 		std::mutex                 g_doomedLock;
 		std::vector<std::uint32_t> g_doomed;
 
@@ -162,22 +181,23 @@ namespace issen::game::executor
 			std::string event;
 			float       pitch{ 0.0f };  // radians added to every strike effect
 			float       roll{ 0.0f };
+			StrikeCut   cut{ StrikeCut::AnyFromPool };
 		};
-		std::vector<Variant> g_variants;
-		Variant              g_currentVariant{};
+		std::vector<Variant>        g_variants;
+		Variant                     g_currentVariant{};
 		RE::BGSSoundDescriptorForm* g_sheatheSound{ nullptr };
 
-		RE::TESEffectShader* g_vanishShader{ nullptr };
-		RE::TESEffectShader* g_appearShader{ nullptr };
-		RE::BGSArtObject*    g_vanishArt{ nullptr };
-		RE::BGSArtObject*    g_appearArt{ nullptr };
+		RE::TESEffectShader*             g_vanishShader{ nullptr };
+		RE::TESEffectShader*             g_appearShader{ nullptr };
+		RE::BGSArtObject*                g_vanishArt{ nullptr };
+		RE::BGSArtObject*                g_appearArt{ nullptr };
 		ReactiveDodgeAPI::RequestDodge_t g_rdfDodge{ nullptr };
 
-		RE::TESImageSpaceModifier*          g_flash{ nullptr };
-		RE::BGSSoundDescriptorForm*         g_strikeSound{ nullptr };
-		RE::BGSSoundDescriptorForm*         g_slowSound{ nullptr };
-		std::vector<RE::BGSImpactDataSet*>  g_strikeImpacts;
-		std::vector<RE::BGSArtObject*>      g_strikeArt;
+		RE::TESImageSpaceModifier*         g_flash{ nullptr };
+		RE::BGSSoundDescriptorForm*        g_strikeSound{ nullptr };
+		RE::BGSSoundDescriptorForm*        g_slowSound{ nullptr };
+		std::vector<RE::BGSImpactDataSet*> g_strikeImpacts;
+		std::vector<RE::BGSArtObject*>     g_strikeArt;
 
 		struct Vfx
 		{
@@ -201,6 +221,37 @@ namespace issen::game::executor
 			if (Settings::Get().devLog) {
 				logger::info(format, std::forward<Args>(args)...);
 			}
+		}
+
+		bool ContainsCaseInsensitive(std::string_view haystack, std::string_view needle)
+		{
+			const auto it = std::ranges::search(haystack, needle, [](char a, char b) {
+				return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+			});
+			return !it.empty();
+		}
+
+		bool IsHeadNode(std::string_view node)
+		{
+			return ContainsCaseInsensitive(node, "neck") || ContainsCaseInsensitive(node, "head");
+		}
+
+		StrikeCut ClassifyStrikeCut(std::string_view event, std::string_view tag)
+		{
+			if (!tag.empty()) {
+				if (ContainsCaseInsensitive(tag, "head") || ContainsCaseInsensitive(tag, "neck")) {
+					return StrikeCut::HeadOnly;
+				}
+				if (ContainsCaseInsensitive(tag, "pool") || ContainsCaseInsensitive(tag, "any")) {
+					return StrikeCut::AnyFromPool;
+				}
+			}
+			// Side power attacks (attackPowerStartRight / attackPowerStartLeft) always cut the head;
+			// standing / forward power attacks (attackPowerStartInPlace, etc.) pick any node from the pool.
+			if (ContainsCaseInsensitive(event, "left") || ContainsCaseInsensitive(event, "right")) {
+				return StrikeCut::HeadOnly;
+			}
+			return StrikeCut::AnyFromPool;
 		}
 
 		std::uint32_t HandleOf(RE::TESObjectREFR* ref)
@@ -397,7 +448,7 @@ namespace issen::game::executor
 				if (g_active) {
 					return;
 				}
-				auto*       vats = RE::VATS::GetSingleton();
+				auto* vats = RE::VATS::GetSingleton();
 				if (!vats || s.slowWorld >= 1.0f || s.slowEaseIn + s.slowHold + s.slowEaseOut <= 0.0f) {
 					return;
 				}
@@ -716,7 +767,18 @@ namespace issen::game::executor
 			return weapon ? static_cast<float>(weapon->GetAttackDamage()) : 0.0f;
 		}
 
-		void Dismember(RE::PlayerCharacter* player, RE::Actor* target, const rules::Rule& rule)
+		void AddNodeIfPresent(std::vector<rules::NodeWeight>& list, RE::NiAVObject* root, const std::string& node, float weight = 1.0f)
+		{
+			if (!root || !root->GetObjectByName(node)) {
+				return;
+			}
+			const bool exists = std::ranges::any_of(list, [&](const rules::NodeWeight& n) { return _stricmp(n.node.c_str(), node.c_str()) == 0; });
+			if (!exists) {
+				list.push_back({ node, weight });
+			}
+		}
+
+		void Dismember(RE::PlayerCharacter* player, RE::Actor* target, const rules::Rule& rule, StrikeCut cut)
 		{
 			const auto& d = rule.outcome.dismember;
 			if (!Settings::Get().dismember || !d.enabled || !g_dfBound || !DismemberingFrameworkAPI::g_API) {
@@ -727,39 +789,84 @@ namespace issen::game::executor
 				DevLog("issen: no dismemberment this time (chance {:.2f})", d.chance);
 				return;
 			}
-			// Rules list nodes of several skeletons (humans, canines...): keep the ones this actor has.
 			auto* root = target->Get3D();
+			if (!root) {
+				return;
+			}
+
+			// Build candidate node list according to the strike animation's cut type:
+			// - StrikeCut::HeadOnly (side power attacks left/right): always target the head/neck first.
+			// - StrikeCut::AnyFromPool (normal/standing power attack): any dismemberment animation from the full pool.
 			std::vector<rules::NodeWeight> nodes;
-			for (const auto& n : d.nodes) {
-				if (root && root->GetObjectByName(n.node)) {
-					nodes.push_back(n);
+			std::vector<rules::NodeWeight> fallbackNodes;
+			if (cut == StrikeCut::HeadOnly) {
+				for (const auto& n : d.nodes) {
+					if (IsHeadNode(n.node)) {
+						AddNodeIfPresent(nodes, root, n.node, n.weight);
+					} else {
+						AddNodeIfPresent(fallbackNodes, root, n.node, n.weight);
+					}
+				}
+				// Ensure head/neck nodes are present even if a custom rule omitted them from its node list.
+				for (const char* headNode : { "NPC Neck [Neck]", "NPC Head [Head]", "NPC Head", "Canine_Neck2", "Canine_Head" }) {
+					AddNodeIfPresent(nodes, root, headNode, 1.0f);
+				}
+			} else {
+				for (const auto& n : d.nodes) {
+					AddNodeIfPresent(nodes, root, n.node, n.weight);
+				}
+				// Ensure the full pool (head + limbs) is available for standing power attacks even if a rule only listed a subset.
+				for (const char* poolNode : {
+						 "NPC Neck [Neck]",
+						 "NPC R Forearm [RLar]",
+						 "NPC L Forearm [LLar]",
+						 "NPC R Calf [RClf]",
+						 "NPC L Calf [LClf]",
+						 "Canine_Neck2",
+						 "Canine_LFrontLeg2",
+						 "Canine_RFrontLeg2",
+						 "Canine_LBackLeg2",
+						 "Canine_RBackLeg2" }) {
+					AddNodeIfPresent(nodes, root, poolNode, 1.0f);
 				}
 			}
+
 			const auto* form = player->GetEquippedObject(false);
 			auto*       weapon = form ? const_cast<RE::TESObjectWEAP*>(form->As<RE::TESObjectWEAP>()) : nullptr;
-			// Dismembering Framework cuts only nodes its data packs describe for this race: try in weighted order. Success
-			// shows in its limb flags (set at once); an actor already missing a limb gets a single try.
-			const bool already = DismemberingFrameworkAPI::g_API->IsDismembered(target);
-			while (!nodes.empty()) {
-				const auto node = rules::PickNode(nodes, roll(g_rng));
-				if (node.empty()) {
-					break;
+			const bool  already = DismemberingFrameworkAPI::g_API->IsDismembered(target);
+
+			auto tryNodes = [&](std::vector<rules::NodeWeight>& pool) -> bool {
+				while (!pool.empty()) {
+					const auto node = rules::PickNode(pool, roll(g_rng));
+					if (node.empty()) {
+						break;
+					}
+					DismemberingFrameworkAPI::DismembermentParams params;
+					params.forceExecution = true;
+					params.specificNode = node;
+					params.ignoreArmorClass = true;
+					DismemberingFrameworkAPI::g_API->Dismember(target, RE::BSFixedString(node), player, weapon, &params);
+					if (already) {
+						logger::info("issen: dismember {:08X} at '{}' ({}, it already missed a limb: one try)", target->GetFormID(), node,
+							cut == StrikeCut::HeadOnly ? "side power -> head" : "standing power -> pool");
+						return true;
+					}
+					if (DismemberingFrameworkAPI::g_API->IsDismembered(target)) {
+						logger::info("issen: dismembered {:08X} at '{}' ({})", target->GetFormID(), node,
+							cut == StrikeCut::HeadOnly ? "side power -> head" : "standing power -> pool");
+						return true;
+					}
+					DevLog("issen: Dismembering Framework did not cut '{}' on {:08X} (no data for it), trying another", node, target->GetFormID());
+					std::erase_if(pool, [&](const rules::NodeWeight& n) { return n.node == node; });
 				}
-				DismemberingFrameworkAPI::DismembermentParams params;
-				params.forceExecution = true;
-				params.specificNode = node;
-				params.ignoreArmorClass = true;
-				DismemberingFrameworkAPI::g_API->Dismember(target, RE::BSFixedString(node), player, weapon, &params);
-				if (already) {
-					logger::info("issen: dismember {:08X} at '{}' (it already missed a limb: one try)", target->GetFormID(), node);
-					return;
-				}
-				if (DismemberingFrameworkAPI::g_API->IsDismembered(target)) {
-					logger::info("issen: dismembered {:08X} at '{}'", target->GetFormID(), node);
-					return;
-				}
-				DevLog("issen: Dismembering Framework did not cut '{}' on {:08X} (no data for it), trying another", node, target->GetFormID());
-				std::erase_if(nodes, [&](const rules::NodeWeight& n) { return n.node == node; });
+				return false;
+			};
+
+			if (tryNodes(nodes)) {
+				return;
+			}
+			if (!fallbackNodes.empty() && tryNodes(fallbackNodes)) {
+				return;
 			}
 			logger::info("issen: no node of the rule could be cut on {:08X} ({} of {} exist on its skeleton)", target->GetFormID(),
 				std::ranges::count_if(d.nodes, [&](const rules::NodeWeight& n) { return root && root->GetObjectByName(n.node); }), d.nodes.size());
@@ -874,7 +981,7 @@ namespace issen::game::executor
 					if (target->IsDead()) {
 						g_sheatheAfterCombat = Settings::Get().sheathe;
 						logger::info("issen: {:08X} died early from hit effects (rule '{}')", target->GetFormID(), d.rule->name);
-						Dismember(player, target, *d.rule);
+						Dismember(player, target, *d.rule, d.cut);
 						SetDoomed(d.target, false);
 						it = g_deaths.erase(it);
 						continue;
@@ -895,7 +1002,7 @@ namespace issen::game::executor
 				if (target->IsDead()) {
 					g_sheatheAfterCombat = Settings::Get().sheathe;
 					logger::info("issen: {:08X} died (rule '{}'){}", target->GetFormID(), d.rule->name, d.tries > 1 ? " on the second try" : "");
-					Dismember(player, target, *d.rule);
+					Dismember(player, target, *d.rule, d.cut);
 					SetDoomed(d.target, false);
 					it = g_deaths.erase(it);
 					continue;
@@ -926,7 +1033,7 @@ namespace issen::game::executor
 				if (target->IsDead()) {
 					g_sheatheAfterCombat = Settings::Get().sheathe;
 					logger::info("issen: {:08X} died from attack side effects (rule '{}')", target->GetFormID(), it->rule->name);
-					Dismember(player, target, *it->rule);
+					Dismember(player, target, *it->rule, it->cut);
 					it = g_sideEffectWatches.erase(it);
 					continue;
 				}
@@ -939,7 +1046,7 @@ namespace issen::game::executor
 			}
 		}
 
-		void Strike(RE::PlayerCharacter* player, RE::Actor* target, const rules::Rule& rule)
+		void Strike(RE::PlayerCharacter* player, RE::Actor* target, const rules::Rule& rule, StrikeCut cut)
 		{
 			const auto handle = HandleOf(target);
 			ClearWatch(handle);
@@ -963,7 +1070,7 @@ namespace issen::game::executor
 				if (!target->IsEssential()) {
 					g_sheatheAfterCombat = s.sheathe;
 					logger::info("issen: {:08X} already dead on strike, dismembering (rule '{}')", target->GetFormID(), rule.name);
-					Dismember(player, target, rule);
+					Dismember(player, target, rule, cut);
 				}
 				return;
 			}
@@ -977,12 +1084,12 @@ namespace issen::game::executor
 					g_sheatheAfterCombat = s.sheathe;
 					logger::info("issen: {:08X} killed immediately by hit effects (rule '{}', health {:.0f}/{:.0f})", target->GetFormID(),
 						rule.name, health, maxHealth);
-					Dismember(player, target, rule);
+					Dismember(player, target, rule, cut);
 					SetDoomed(handle, false);
 					return;
 				}
 				const float earlyLethal = av->GetActorValue(RE::ActorValue::kHealth) <= 0.0f;
-				g_deaths.push_back({ handle, &rule, earlyLethal ? 0.0f : s.deathDelay, -1.0f });
+				g_deaths.push_back({ handle, &rule, earlyLethal ? 0.0f : s.deathDelay, -1.0f, false, 0.0f, 0, cut });
 				logger::info("issen: {:08X} struck, dies in {:.2f}s (rule '{}', health {:.0f}/{:.0f})", target->GetFormID(),
 					earlyLethal ? 0.0f : s.deathDelay, rule.name, health, maxHealth);
 				return;
@@ -1007,10 +1114,10 @@ namespace issen::game::executor
 					g_sheatheAfterCombat = s.sheathe;
 					logger::info("issen: {:08X} killed (rule '{}', health {:.0f}/{:.0f}{})", target->GetFormID(), rule.name,
 						health, maxHealth, target->IsProtected() ? ", protected" : "");
-					Dismember(player, target, rule);
+					Dismember(player, target, rule, cut);
 				} else {
 					// The engine can take a few frames to mark the actor dead: verify in UpdateDeaths before dismembering.
-					g_deaths.push_back({ handle, &rule, 0.0f, -1.0f, true, s.killVerifyTime, 1 });
+					g_deaths.push_back({ handle, &rule, 0.0f, -1.0f, true, s.killVerifyTime, 1, cut });
 					logger::info("issen: {:08X} lethal strike applied, awaiting death verification (rule '{}', health {:.0f}/{:.0f})",
 						target->GetFormID(), rule.name, health, maxHealth);
 				}
@@ -1030,12 +1137,12 @@ namespace issen::game::executor
 					g_sheatheAfterCombat = s.sheathe;
 					logger::info("issen: {:08X} killed by hit + side effects (rule '{}', health {:.0f}/{:.0f})", target->GetFormID(),
 						rule.name, health, maxHealth);
-					Dismember(player, target, rule);
+					Dismember(player, target, rule, cut);
 					return;
 				}
 				SetDoomed(handle, true);
 				if (afterHealth > 0.0f && s.deathDelayed) {
-					g_deaths.push_back({ handle, &rule, s.deathDelay, -1.0f });
+					g_deaths.push_back({ handle, &rule, s.deathDelay, -1.0f, false, 0.0f, 0, cut });
 					logger::info("issen: {:08X} brought to execute threshold by hit + side effects, dies in {:.2f}s (rule '{}')",
 						target->GetFormID(), s.deathDelay, rule.name);
 					return;
@@ -1045,9 +1152,9 @@ namespace issen::game::executor
 					g_sheatheAfterCombat = s.sheathe;
 					logger::info("issen: {:08X} killed by hit + side effects (rule '{}', health {:.0f}/{:.0f})", target->GetFormID(),
 						rule.name, health, maxHealth);
-					Dismember(player, target, rule);
+					Dismember(player, target, rule, cut);
 				} else {
-					g_deaths.push_back({ handle, &rule, 0.0f, -1.0f, true, s.killVerifyTime, 1 });
+					g_deaths.push_back({ handle, &rule, 0.0f, -1.0f, true, s.killVerifyTime, 1, cut });
 					logger::info("issen: {:08X} lethal health drop from hit + side effects, awaiting death for dismemberment (rule '{}')",
 						target->GetFormID(), rule.name);
 				}
@@ -1056,7 +1163,7 @@ namespace issen::game::executor
 			if (!target->IsEssential()) {
 				// Watch briefly in case asynchronous side effects (enchantment ActiveEffect tick, poison, bleed, OnHit script)
 				// kill the enemy a few frames after LandHit returns.
-				g_sideEffectWatches.push_back({ handle, &rule, kSideEffectWatchTime });
+				g_sideEffectWatches.push_back({ handle, &rule, kSideEffectWatchTime, cut });
 			}
 			if (verdict.stagger > 0.0f) {
 				target->SetGraphVariableFloat("staggerMagnitude", verdict.stagger);
@@ -1066,7 +1173,21 @@ namespace issen::game::executor
 				rule.name, health, afterHealth, maxHealth, verdict.stagger > 0.0f ? ", staggered" : "");
 		}
 
-		// Right in front of the enemy, on the side the player is on; the player's own spot when already that close.
+		// Where the player looks: in first person the player's own yaw, else the third-person camera's.
+		float ViewYaw(RE::PlayerCharacter* player)
+		{
+			auto* camera = RE::PlayerCamera::GetSingleton();
+			if (!camera || camera->IsInFirstPerson() || !camera->cameraRoot) {
+				return player->GetAngleZ();
+			}
+			const auto& m = camera->cameraRoot->world.rotate;  // column 1 = forward
+			return std::atan2(m.entry[0][1], m.entry[1][1]);
+		}
+
+		// Right in front of the enemy; the player's own spot when already that close. With the enemy ahead of the view the
+		// dash ends on the line of sight, the enemy straight in front, so the camera need not turn (after a perfect dodge
+		// the enemy is often far to a side: turning there swung the view by up to 90 degrees). Otherwise on the side the
+		// player is on.
 		RE::NiPoint3 DashEnd(RE::PlayerCharacter* player, RE::Actor* target)
 		{
 			const auto&  s = Settings::Get();
@@ -1076,7 +1197,10 @@ namespace issen::game::executor
 			if (len <= s.dashStopDistance + 1.0f) {
 				return player->GetPosition();
 			}
-			RE::NiPoint3 to = target->GetPosition() + away / len * s.dashStopDistance;
+			const float        yaw = ViewYaw(player);
+			const RE::NiPoint3 back{ -std::sin(yaw), -std::cos(yaw), 0.0f };
+			const RE::NiPoint3 dir = away.Dot(back) > 0.0f ? back : away / len;
+			RE::NiPoint3       to = target->GetPosition() + dir * s.dashStopDistance;
 			to.z = target->GetPosition().z;
 			return to;
 		}
@@ -1096,6 +1220,18 @@ namespace issen::game::executor
 				player->AsActorValueOwner()->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kTemporary, RE::ActorValue::kWeaponSpeedMult, -g_speedDelta);
 			}
 			g_speedDelta = 0.0f;
+		}
+
+		bool  g_deferredStart{ false };    // the strike event waits a frame for attackStop
+		float g_strikeGraphSpeed{ 1.0f };  // weaponSpeedMult graph variable for the strike
+
+		bool SendStrikeEvent(RE::PlayerCharacter* player)
+		{
+			g_hitFramesAtBegin = g_hitFrames.load(std::memory_order_relaxed);
+			player->SetGraphVariableFloat("weaponSpeedMult", g_strikeGraphSpeed);
+			const bool started = player->NotifyAnimationGraph(RE::BSFixedString(g_currentVariant.event));
+			player->SetGraphVariableFloat("weaponSpeedMult", g_strikeGraphSpeed);
+			return started;
 		}
 
 		// The issen strike clip: stop what is playing, start the configured attack, sped up.
@@ -1123,13 +1259,33 @@ namespace issen::game::executor
 			const auto* actorState = player->AsActorState();
 			const bool  attacking = actorState && actorState->GetAttackState() != RE::ATTACK_STATE_ENUM::kNone;
 			const bool  stopped = s.animStopFirst && attacking && player->NotifyAnimationGraph("attackStop");
-			const bool started = player->NotifyAnimationGraph(RE::BSFixedString(g_currentVariant.event));
-			player->SetGraphVariableFloat("weaponSpeedMult", normal * speed);
+			g_strikeGraphSpeed = normal * speed;
 			g_speedLeft = s.animSpeedTime;
 			g_speedRestore = true;
-			DevLog("issen: animation '{}' {} (attackStop {}), speed x{:.1f}", g_currentVariant.event, started ? "started" : "REJECTED by the graph",
-				!s.animStopFirst || !attacking ? "not sent" : (stopped ? "taken" : "rejected"), speed);
+			if (stopped) {
+				// The graph leaves the attack on its next update: an attack event sent in the same frame was lost (no
+				// HitFrame, the strike fell back to its timer, and in first person the view drifted). Sent next frame.
+				g_deferredStart = true;
+				DevLog("issen: animation '{}' ({}) after attackStop, next frame, speed x{:.1f}", g_currentVariant.event,
+					g_currentVariant.cut == StrikeCut::HeadOnly ? "head cut" : "pool cut", speed);
+				return true;
+			}
+			const bool started = SendStrikeEvent(player);
+			DevLog("issen: animation '{}' ({}) {} (attackStop {}), speed x{:.1f}", g_currentVariant.event,
+				g_currentVariant.cut == StrikeCut::HeadOnly ? "head cut" : "pool cut", started ? "started" : "REJECTED by the graph",
+				!s.animStopFirst || !attacking ? "not sent" : "rejected", speed);
 			return started;
+		}
+
+		// A strike event deferred past attackStop, the frame after.
+		void SendDeferredStrike(RE::PlayerCharacter* player)
+		{
+			if (!g_deferredStart) {
+				return;
+			}
+			g_deferredStart = false;
+			const bool started = SendStrikeEvent(player);
+			DevLog("issen: animation '{}' {} after attackStop", g_currentVariant.event, started ? "started" : "REJECTED by the graph");
 		}
 
 		void PlayOn(RE::PlayerCharacter* player, RE::TESEffectShader* shader, RE::BGSArtObject* art)
@@ -1156,7 +1312,7 @@ namespace issen::game::executor
 			}
 			const bool  onHitFrame = animated && s.strikeOnHitFrame;
 			const float delay = onHitFrame ? s.strikeMaxDelay : s.strikeDelay;
-			g_strikes.push_back({ handle, rule, delay, onHitFrame });
+			g_strikes.push_back({ handle, rule, delay, onHitFrame, g_currentVariant.cut });
 			if (s.lockPosition) {
 				g_lock = true;
 				g_lockAt = player->GetPosition();
@@ -1173,8 +1329,7 @@ namespace issen::game::executor
 			a.timer = Settings::Get().vanishTime;
 			a.from = player->GetPosition();
 			a.to = a.dash ? DashEnd(player, target) : a.from;
-			FaceTarget(player, target);
-			ghost::Spawn(player);
+			ghost::Spawn(player);  // facing the enemy waits for Appear: the dash keeps the view
 			DevLog("issen: dash {:.0f} units to {:08X}", a.from.GetDistance(a.to), target->GetFormID());
 		}
 
@@ -1197,10 +1352,37 @@ namespace issen::game::executor
 			a.timer = Settings::Get().appearPause;
 		}
 
+		void TracePose(RE::PlayerCharacter* player, const char* where)
+		{
+			if (g_poseLeft <= 0.0f || !Settings::Get().devLog) {
+				return;
+			}
+			constexpr float kDeg = 180.0f / std::numbers::pi_v<float>;
+			auto*           camera = RE::PlayerCamera::GetSingleton();
+			float           cameraYaw = 0.0f;
+			if (camera && camera->cameraRoot) {
+				const auto& m = camera->cameraRoot->world.rotate;  // column 1 = forward
+				cameraYaw = std::atan2(m.entry[0][1], m.entry[1][1]) * kDeg;
+			}
+			auto*       target = ActorOf(g_poseTarget);
+			const auto  at = player->GetPosition();
+			const float dist = target ? at.GetDistance(target->GetPosition()) : -1.0f;
+			const float toTarget = target ? player->GetHeadingAngle(target->GetPosition(), false) : 0.0f;
+			logger::info("  pose {}: yaw {:.1f}, camera yaw {:.1f} ({}), enemy {:.0f} away at {:.1f}, at ({:.0f}, {:.0f}, {:.0f}), attack state {}", where,
+				player->GetAngleZ() * kDeg, cameraYaw, camera && camera->IsInFirstPerson() ? "1P" : "3P", dist, toTarget, at.x, at.y, at.z,
+				static_cast<int>(player->AsActorState()->GetAttackState()));
+		}
+
 		void Begin(RE::PlayerCharacter* player, RE::Actor* target, const Request& r)
 		{
 			const auto& s = Settings::Get();
-			if (s.faceTarget) {
+			g_poseLeft = 2.0f;
+			g_poseTarget = r.target;
+			TracePose(player, "begin");
+			const bool perfect = r.kind == rules::Kind::PerfectDodge;
+			const bool preStep = !perfect && s.preStep;
+			// A dash straight away turns the player only where it lands (Appear); a back step goes away from the enemy.
+			if (s.faceTarget && !(perfect && s.dashOnPerfect)) {
 				FaceTarget(player, target);
 			}
 			slow::Start();
@@ -1209,8 +1391,6 @@ namespace issen::game::executor
 			}
 			PlaySound(g_slowSound, nullptr);
 
-			const bool perfect = r.kind == rules::Kind::PerfectDodge;
-			const bool preStep = !perfect && s.preStep;
 			Approach   a{ r.target, r.rule, r.kind, Phase::PreStep, 0.0f, perfect ? s.dashOnPerfect : preStep };
 			if (a.dash) {
 				ghost::Prepare(player);
@@ -1256,9 +1436,11 @@ namespace issen::game::executor
 			std::istringstream in(item);
 			Variant            v;
 			float              pitchDeg = 0.0f, rollDeg = 0.0f;
-			in >> v.event >> pitchDeg >> rollDeg;
+			std::string        cutTag;
+			in >> v.event >> pitchDeg >> rollDeg >> cutTag;
 			v.pitch = pitchDeg * std::numbers::pi_v<float> / 180.0f;
 			v.roll = rollDeg * std::numbers::pi_v<float> / 180.0f;
+			v.cut = ClassifyStrikeCut(v.event, cutTag);
 			if (!v.event.empty()) {
 				g_variants.push_back(std::move(v));
 			}
@@ -1330,6 +1512,7 @@ namespace issen::game::executor
 		if (!player) {
 			return;
 		}
+		SendDeferredStrike(player);  // before this frame's strikes, which may defer a new one
 		for (const auto& c : cues) {
 			auto* target = ActorOf(c.target);
 			if (target && !target->IsDead() && target->Is3DLoaded()) {
@@ -1354,7 +1537,7 @@ namespace issen::game::executor
 				if (!target->IsEssential()) {
 					g_sheatheAfterCombat = Settings::Get().sheathe;
 					logger::info("issen: {:08X} died during approach, dismembering (rule '{}')", target->GetFormID(), it->rule->name);
-					Dismember(player, target, *it->rule);
+					Dismember(player, target, *it->rule, StrikeCut::AnyFromPool);
 				}
 				it = g_approaches.erase(it);
 				continue;
@@ -1387,6 +1570,10 @@ namespace issen::game::executor
 		if (g_speedLeft > 0.0f) {
 			g_speedLeft -= dt;
 		}
+		if (g_poseLeft > 0.0f) {
+			TracePose(player, "update");
+			g_poseLeft -= dt;
+		}
 		if (g_traceLeft > 0.0f) {
 			g_traceLeft -= dt;
 			if (g_traceLeft <= 0.0f) {
@@ -1406,16 +1593,21 @@ namespace issen::game::executor
 			}
 			DevLog("issen: strike {}", dead ? "on early target death" : (it->onHitFrame && hitFrame ? "on HitFrame" : "on the timer"));
 			if (target && target->Is3DLoaded()) {
-				Strike(player, target, *it->rule);
+				Strike(player, target, *it->rule, it->cut);
 			}
 			it = g_strikes.erase(it);
 		}
 		UpdateDeaths(player, dt);
 
-		if (g_lock && g_strikes.empty()) {
-			g_lockAfter -= dt;
-			if (g_lockAfter <= 0.0f) {
-				g_lock = false;
+		if (g_lock) {
+			if (player->GetPosition().GetDistance(g_lockAt) > 0.01f) {
+				player->SetPosition(g_lockAt, true);
+			}
+			if (g_strikes.empty()) {
+				g_lockAfter -= dt;
+				if (g_lockAfter <= 0.0f) {
+					g_lock = false;
+				}
 			}
 		}
 
@@ -1449,9 +1641,10 @@ namespace issen::game::executor
 		if (!player) {
 			return;
 		}
+		TracePose(player, "post");
 		if (g_lock) {
 			const auto at = player->GetPosition();
-			if (at.GetDistance(g_lockAt) > 1.0f) {
+			if (at.GetDistance(g_lockAt) > 0.01f) {
 				player->SetPosition(g_lockAt, true);
 			}
 		}
@@ -1487,6 +1680,7 @@ namespace issen::game::executor
 		g_sheatheAfterCombat = false;
 		g_outOfCombat = 0.0f;
 		g_lock = false;
+		g_deferredStart = false;
 		{
 			std::scoped_lock lock(g_doomedLock);
 			g_doomed.clear();

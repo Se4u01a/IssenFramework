@@ -46,7 +46,7 @@ TEST(default_humanoid_is_killed)
 	const auto  set = DefaultRules();
 	const auto* rule = set.Match(Npc());
 	CHECK(rule && rule->outcome.mode == Mode::Kill);
-	CHECK(rule && rule->outcome.dismember.nodes.size() == 4);  // arm or leg
+	CHECK(rule && rule->outcome.dismember.nodes.size() == 5);  // full pool: head, arms and legs
 }
 
 TEST(default_humanoid_after_a_perfect_dodge_loses_the_head)
@@ -56,7 +56,7 @@ TEST(default_humanoid_after_a_perfect_dodge_loses_the_head)
 	s.kind = Kind::PerfectDodge;
 	const auto* rule = set.Match(s);
 	CHECK(rule && rule->outcome.mode == Mode::Kill);
-	CHECK(rule && rule->outcome.dismember.nodes.size() == 1 && rule->outcome.dismember.nodes[0].node == "NPC Neck [Neck]");
+	CHECK(rule && rule->outcome.dismember.nodes.size() == 5 && rule->outcome.dismember.nodes[0].node == "NPC Neck [Neck]");
 }
 
 TEST(default_boss_takes_damage)

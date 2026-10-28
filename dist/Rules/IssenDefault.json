@@ -7,7 +7,8 @@
 //       the hit lands). "Kill" with oneShotMaxHealth / oneShotMaxHealthPct kills only up to that health; above it the
 //       damage fields apply (with the execute thresholds).
 // outcome.dismember (Dismembering Framework, only when the issen kills): chance 0..1, nodes picked by weight among
-//       the ones the enemy's skeleton has; a node its data packs do not describe is skipped for the next one.
+//       the ones the enemy's skeleton has; side power attacks always cut the head/neck, while standing power attacks pick
+//       any dismemberment node from this pool.
 //       Humans / draugr / trolls: "NPC Neck [Neck]" (head), "NPC L|R Forearm [LLar|RLar]", "NPC L|R Calf [LClf|RClf]".
 //       Wolves / dogs: "Canine_Neck2", "Canine_LFrontLeg2", "Canine_RFrontLeg2", "Canine_LBackLeg2", "Canine_RBackLeg2".
 {
@@ -19,23 +20,28 @@
       "outcome": { "mode": "None" }
     },
     {
-      "name": "Humanoid bosses after a perfect dodge: heavy damage, execute below 25%, head",
+      "name": "Humanoid bosses after a perfect dodge: heavy damage, execute below 25%",
       "priority": 910,
       "when": { "keywordsAny": ["ActorTypeNPC"], "boss": true, "kind": "PerfectDodge" },
       "outcome": {
         "mode": "Damage", "damageWeaponMult": 3.0, "damageMaxHealthPct": 0.25, "executeBelowHealthPct": 0.25, "stagger": 0.8,
         "dismember": { "chance": 1.0, "nodes": [
-            { "node": "NPC Neck [Neck]", "weight": 1 }
+            { "node": "NPC Neck [Neck]", "weight": 1 },
+            { "node": "NPC R Forearm [RLar]", "weight": 1 },
+            { "node": "NPC L Forearm [LLar]", "weight": 1 },
+            { "node": "NPC R Calf [RClf]", "weight": 1 },
+            { "node": "NPC L Calf [LClf]", "weight": 1 }
           ] }
       }
     },
     {
-      "name": "Humanoid bosses: heavy damage, execute below 25%, arm or leg",
+      "name": "Humanoid bosses: heavy damage, execute below 25%",
       "priority": 900,
       "when": { "keywordsAny": ["ActorTypeNPC"], "boss": true },
       "outcome": {
         "mode": "Damage", "damageWeaponMult": 3.0, "damageMaxHealthPct": 0.25, "executeBelowHealthPct": 0.25, "stagger": 0.8,
         "dismember": { "chance": 1.0, "nodes": [
+            { "node": "NPC Neck [Neck]", "weight": 1 },
             { "node": "NPC R Forearm [RLar]", "weight": 1 },
             { "node": "NPC L Forearm [LLar]", "weight": 1 },
             { "node": "NPC R Calf [RClf]", "weight": 1 },
@@ -50,18 +56,11 @@
       "outcome": { "mode": "Damage", "damageWeaponMult": 2.0, "damageMaxHealthPct": 0.2, "executeBelowHealthPct": 0.15, "stagger": 0.6 }
     },
     {
-      "name": "Humanoids after a perfect dodge: killed, head",
+      "name": "Humanoids after a perfect dodge: killed",
       "priority": 110,
       "when": { "keywordsAny": ["ActorTypeNPC"], "kind": "PerfectDodge" },
       "outcome": { "mode": "Kill", "dismember": { "chance": 1.0, "nodes": [
-            { "node": "NPC Neck [Neck]", "weight": 1 }
-          ] } }
-    },
-    {
-      "name": "Humanoids: killed, arm or leg",
-      "priority": 100,
-      "when": { "keywordsAny": ["ActorTypeNPC"] },
-      "outcome": { "mode": "Kill", "dismember": { "chance": 1.0, "nodes": [
+            { "node": "NPC Neck [Neck]", "weight": 1 },
             { "node": "NPC R Forearm [RLar]", "weight": 1 },
             { "node": "NPC L Forearm [LLar]", "weight": 1 },
             { "node": "NPC R Calf [RClf]", "weight": 1 },
@@ -69,7 +68,19 @@
           ] } }
     },
     {
-      "name": "Creatures after a perfect dodge: damage, execute below 30%, head",
+      "name": "Humanoids: killed",
+      "priority": 100,
+      "when": { "keywordsAny": ["ActorTypeNPC"] },
+      "outcome": { "mode": "Kill", "dismember": { "chance": 1.0, "nodes": [
+            { "node": "NPC Neck [Neck]", "weight": 1 },
+            { "node": "NPC R Forearm [RLar]", "weight": 1 },
+            { "node": "NPC L Forearm [LLar]", "weight": 1 },
+            { "node": "NPC R Calf [RClf]", "weight": 1 },
+            { "node": "NPC L Calf [LClf]", "weight": 1 }
+          ] } }
+    },
+    {
+      "name": "Creatures after a perfect dodge: damage, execute below 30%",
       "priority": 10,
       "when": { "kind": "PerfectDodge" },
       "outcome": {
@@ -78,13 +89,21 @@
           "chance": 1.0,
           "nodes": [
             { "node": "NPC Neck [Neck]", "weight": 1 },
-            { "node": "Canine_Neck2", "weight": 1 }
+            { "node": "NPC R Forearm [RLar]", "weight": 1 },
+            { "node": "NPC L Forearm [LLar]", "weight": 1 },
+            { "node": "NPC R Calf [RClf]", "weight": 1 },
+            { "node": "NPC L Calf [LClf]", "weight": 1 },
+            { "node": "Canine_Neck2", "weight": 1 },
+            { "node": "Canine_LFrontLeg2", "weight": 1 },
+            { "node": "Canine_RFrontLeg2", "weight": 1 },
+            { "node": "Canine_LBackLeg2", "weight": 1 },
+            { "node": "Canine_RBackLeg2", "weight": 1 }
           ]
         }
       }
     },
     {
-      "name": "Creatures: damage, execute below 30%, leg or arm",
+      "name": "Creatures: damage, execute below 30%",
       "priority": 0,
       "when": {},
       "outcome": {
@@ -92,10 +111,12 @@
         "dismember": {
           "chance": 1.0,
           "nodes": [
+            { "node": "NPC Neck [Neck]", "weight": 1 },
             { "node": "NPC R Forearm [RLar]", "weight": 1 },
             { "node": "NPC L Forearm [LLar]", "weight": 1 },
             { "node": "NPC R Calf [RClf]", "weight": 1 },
             { "node": "NPC L Calf [LClf]", "weight": 1 },
+            { "node": "Canine_Neck2", "weight": 1 },
             { "node": "Canine_LFrontLeg2", "weight": 1 },
             { "node": "Canine_RFrontLeg2", "weight": 1 },
             { "node": "Canine_LBackLeg2", "weight": 1 },

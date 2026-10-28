@@ -52,8 +52,9 @@ namespace issen::game
 
 		// [Animation] the player's issen strike
 		// graph events picked at random per issen: "event pitchDegrees rollDegrees" (turns the slash effects to match the
-		// swing: a side power attack cuts flat, the standing one overhead); empty = keep the attack you pressed
-		std::string animEvent{ "attackPowerStartRight 0 0, attackPowerStartInPlace -90 0" };
+		// swing: side power attacks cut flat and decapitate, the standing one cuts overhead and picks any dismemberment
+		// from the pool); empty = keep the attack you pressed
+		std::string animEvent{ "attackPowerStartRight 0 0, attackPowerStartLeft 0 0, attackPowerStartInPlace -90 0" };
 		bool        animStopFirst{ true };                 // send attackStop first so the event is taken mid-attack
 		float       animSpeed{ 2.0f };                     // weaponSpeedMult while it plays
 		float       animSpeedTime{ 0.6f };                 // player seconds the speed is held
