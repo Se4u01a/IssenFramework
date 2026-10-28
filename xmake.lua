@@ -5,7 +5,7 @@ set_xmakever("3.0.8")
 includes(os.getenv("COMMONLIBSSE_NG_PATH") or "extern/CommonLibSSE-NG")
 
 set_project("IssenFramework")
-set_version("0.1.0")
+set_version("1.0.0")
 
 add_rules("mode.debug", "mode.releasedbg")
 set_defaultplat("windows")
