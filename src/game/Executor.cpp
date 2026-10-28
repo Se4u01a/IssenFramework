@@ -103,6 +103,18 @@ namespace issen::game::executor
 			int                tries{ 0 };
 		};
 		std::vector<Death>         g_deaths;
+
+		// Short post-strike watch for non-kill verdicts: if an asynchronous hit side effect (enchantment ActiveEffect,
+		// poison, bleeding perk, OnHit script) finishes the enemy off right after the strike, still dismember.
+		struct SideEffectWatch
+		{
+			std::uint32_t      target;
+			const rules::Rule* rule;
+			float              timeLeft;
+		};
+		constexpr float              kSideEffectWatchTime = 1.5f;
+		std::vector<SideEffectWatch> g_sideEffectWatches;
+
 		bool                       g_sheatheAfterCombat{ false };  // an issen killed: sheathe once the combat is over
 		float                      g_outOfCombat{ 0.0f };          // seconds the player has been out of combat
 
@@ -122,6 +134,11 @@ namespace issen::game::executor
 			} else if (!doomed && it != g_doomed.end()) {
 				g_doomed.erase(it);
 			}
+		}
+
+		void ClearWatch(std::uint32_t handle)
+		{
+			std::erase_if(g_sideEffectWatches, [handle](const SideEffectWatch& w) { return w.target == handle; });
 		}
 
 		// The strike animation variants ([Animation] sEvent).
@@ -755,6 +772,20 @@ namespace issen::game::executor
 					it = g_deaths.erase(it);
 					continue;
 				}
+				auto* av = target->AsActorValueOwner();
+				// If a side effect (enchantment, poison, perk spell, etc.) already killed the target or dropped its
+				// health to <= 0 before the delayed-death timer expired, finish / dismember immediately instead of waiting.
+				if (!d.killed && (target->IsDead() || (av && av->GetActorValue(RE::ActorValue::kHealth) <= 0.0f))) {
+					if (target->IsDead()) {
+						g_sheatheAfterCombat = Settings::Get().sheathe;
+						logger::info("issen: {:08X} died early from hit effects (rule '{}')", target->GetFormID(), d.rule->name);
+						Dismember(player, target, *d.rule);
+						SetDoomed(d.target, false);
+						it = g_deaths.erase(it);
+						continue;
+					}
+					d.timer = 0.0f;
+				}
 				d.timer -= dt;
 				if (d.timer > 0.0f) {
 					++it;
@@ -784,17 +815,40 @@ namespace issen::game::executor
 					++it;
 					continue;
 				}
-				auto* av = target->AsActorValueOwner();
 				logger::info("issen: {:08X} NOT killed after {} tries (health {:.0f}, essential {}, protected {}, in kill move {}, race {})",
 					target->GetFormID(), d.tries, av->GetActorValue(RE::ActorValue::kHealth), target->IsEssential(), target->IsProtected(),
 					target->IsInKillMove(), target->GetRace() ? target->GetRace()->GetFormEditorID() : "?");
 				SetDoomed(d.target, false);
 				it = g_deaths.erase(it);
 			}
+
+			for (auto it = g_sideEffectWatches.begin(); it != g_sideEffectWatches.end();) {
+				auto* target = ActorOf(it->target);
+				if (!target || !target->Is3DLoaded() || target->IsEssential()) {
+					it = g_sideEffectWatches.erase(it);
+					continue;
+				}
+				if (target->IsDead()) {
+					g_sheatheAfterCombat = Settings::Get().sheathe;
+					logger::info("issen: {:08X} died from attack side effects (rule '{}')", target->GetFormID(), it->rule->name);
+					Dismember(player, target, *it->rule);
+					it = g_sideEffectWatches.erase(it);
+					continue;
+				}
+				it->timeLeft -= dt;
+				if (it->timeLeft <= 0.0f) {
+					it = g_sideEffectWatches.erase(it);
+					continue;
+				}
+				++it;
+			}
 		}
 
 		void Strike(RE::PlayerCharacter* player, RE::Actor* target, const rules::Rule& rule)
 		{
+			const auto handle = HandleOf(target);
+			ClearWatch(handle);
+
 			auto*       av = target->AsActorValueOwner();
 			const float health = av->GetActorValue(RE::ActorValue::kHealth);
 			const float maxHealth = av->GetPermanentActorValue(RE::ActorValue::kHealth);
@@ -808,14 +862,34 @@ namespace issen::game::executor
 			PlayStrikeEffects(player, target);
 			slow::Hitstop();
 			const auto& s = Settings::Get();
+
+			// If the player's attack swing or an effect already killed the target right before Strike() ran, dismember now.
+			if (target->IsDead()) {
+				if (!target->IsEssential()) {
+					g_sheatheAfterCombat = s.sheathe;
+					logger::info("issen: {:08X} already dead on strike, dismembering (rule '{}')", target->GetFormID(), rule.name);
+					Dismember(player, target, rule);
+				}
+				return;
+			}
+
 			if (verdict.kill && !target->IsEssential() && s.deathDelayed) {
 				// Onimusha: it stands while you sheathe, then falls. Its hits no longer land meanwhile.
-				LandHit(player, target, 0.0f);  // the hit's effects now, the death later
-				const auto handle = HandleOf(target);
-				g_deaths.push_back({ handle, &rule, s.deathDelay, -1.0f });
 				SetDoomed(handle, true);
-				logger::info("issen: {:08X} struck, dies in {:.2f}s (rule '{}', health {:.0f}/{:.0f})", target->GetFormID(), s.deathDelay, rule.name,
-					health, maxHealth);
+				LandHit(player, target, 0.0f);  // the hit's effects now, the death later
+				if (target->IsDead()) {
+					// A side effect (enchantment, poison, perk spell) killed the target on the spot: dismember now.
+					g_sheatheAfterCombat = s.sheathe;
+					logger::info("issen: {:08X} killed immediately by hit effects (rule '{}', health {:.0f}/{:.0f})", target->GetFormID(),
+						rule.name, health, maxHealth);
+					Dismember(player, target, rule);
+					SetDoomed(handle, false);
+					return;
+				}
+				const float earlyLethal = av->GetActorValue(RE::ActorValue::kHealth) <= 0.0f;
+				g_deaths.push_back({ handle, &rule, earlyLethal ? 0.0f : s.deathDelay, -1.0f });
+				logger::info("issen: {:08X} struck, dies in {:.2f}s (rule '{}', health {:.0f}/{:.0f})", target->GetFormID(),
+					earlyLethal ? 0.0f : s.deathDelay, rule.name, health, maxHealth);
 				return;
 			}
 			if (verdict.kill) {
@@ -828,32 +902,73 @@ namespace issen::game::executor
 						rule.name);
 					return;
 				}
+				SetDoomed(handle, true);
 				LandHit(player, target, health + 10.0f);
 				if (!target->IsDead()) {
-					target->KillImpl(player, std::max(health, 1.0f), true, false);
+					TryKill(player, target);
 				}
-				if (!target->IsDead()) {
-					av->DamageActorValue(RE::ActorValue::kHealth, health + 10.0f);  // KillImpl refused: take the health instead
-				}
-				const bool dead = target->IsDead();
-				logger::info("issen: {:08X} {} (rule '{}', health {:.0f}/{:.0f}{})", target->GetFormID(), dead ? "killed" : "NOT killed", rule.name,
-					health, maxHealth, target->IsProtected() ? ", protected" : "");
-				if (dead) {
+				if (target->IsDead()) {
+					SetDoomed(handle, false);
+					g_sheatheAfterCombat = s.sheathe;
+					logger::info("issen: {:08X} killed (rule '{}', health {:.0f}/{:.0f}{})", target->GetFormID(), rule.name,
+						health, maxHealth, target->IsProtected() ? ", protected" : "");
 					Dismember(player, target, rule);
 				} else {
-					logger::info("issen: {:08X} still alive: no dismemberment (it would stand without the limb)", target->GetFormID());
+					// The engine can take a few frames to mark the actor dead: verify in UpdateDeaths before dismembering.
+					g_deaths.push_back({ handle, &rule, 0.0f, -1.0f, true, s.killVerifyTime, 1 });
+					logger::info("issen: {:08X} lethal strike applied, awaiting death verification (rule '{}', health {:.0f}/{:.0f})",
+						target->GetFormID(), rule.name, health, maxHealth);
 				}
 				return;
 			}
 			if (!LandHit(player, target, verdict.damage)) {
 				av->DamageActorValue(RE::ActorValue::kHealth, verdict.damage);
 			}
+			const float afterHealth = av->GetActorValue(RE::ActorValue::kHealth);
+			const bool  executeAfter = afterHealth <= 0.0f ||
+			                           (maxHealth > 0.0f && afterHealth <= outcome.executeBelowHealthPct * maxHealth) ||
+			                           (outcome.executeBelowHealth > 0.0f && afterHealth <= outcome.executeBelowHealth);
+			if (!target->IsEssential() && (target->IsDead() || executeAfter)) {
+				// Non-kill verdict before the hit, but side effects (enchantment, poison, perk spell) killed the enemy
+				// or pushed its remaining health into the rule's execute threshold.
+				if (target->IsDead()) {
+					g_sheatheAfterCombat = s.sheathe;
+					logger::info("issen: {:08X} killed by hit + side effects (rule '{}', health {:.0f}/{:.0f})", target->GetFormID(),
+						rule.name, health, maxHealth);
+					Dismember(player, target, rule);
+					return;
+				}
+				SetDoomed(handle, true);
+				if (afterHealth > 0.0f && s.deathDelayed) {
+					g_deaths.push_back({ handle, &rule, s.deathDelay, -1.0f });
+					logger::info("issen: {:08X} brought to execute threshold by hit + side effects, dies in {:.2f}s (rule '{}')",
+						target->GetFormID(), s.deathDelay, rule.name);
+					return;
+				}
+				if (TryKill(player, target)) {
+					SetDoomed(handle, false);
+					g_sheatheAfterCombat = s.sheathe;
+					logger::info("issen: {:08X} killed by hit + side effects (rule '{}', health {:.0f}/{:.0f})", target->GetFormID(),
+						rule.name, health, maxHealth);
+					Dismember(player, target, rule);
+				} else {
+					g_deaths.push_back({ handle, &rule, 0.0f, -1.0f, true, s.killVerifyTime, 1 });
+					logger::info("issen: {:08X} lethal health drop from hit + side effects, awaiting death for dismemberment (rule '{}')",
+						target->GetFormID(), rule.name);
+				}
+				return;
+			}
+			if (!target->IsEssential()) {
+				// Watch briefly in case asynchronous side effects (enchantment ActiveEffect tick, poison, bleed, OnHit script)
+				// kill the enemy a few frames after LandHit returns.
+				g_sideEffectWatches.push_back({ handle, &rule, kSideEffectWatchTime });
+			}
 			if (verdict.stagger > 0.0f) {
 				target->SetGraphVariableFloat("staggerMagnitude", verdict.stagger);
 				target->NotifyAnimationGraph("staggerStart");
 			}
 			logger::info("issen: {:08X} takes {:.0f} (rule '{}', health {:.0f} -> {:.0f} of {:.0f}){}", target->GetFormID(), verdict.damage,
-				rule.name, health, health - verdict.damage, maxHealth, verdict.stagger > 0.0f ? ", staggered" : "");
+				rule.name, health, afterHealth, maxHealth, verdict.stagger > 0.0f ? ", staggered" : "");
 		}
 
 		// Right in front of the enemy, on the side the player is on; the player's own spot when already that close.
@@ -1109,7 +1224,16 @@ namespace issen::game::executor
 		for (auto it = g_approaches.begin(); it != g_approaches.end();) {
 			it->timer -= dt;
 			auto* target = ActorOf(it->target);
-			if (!target || target->IsDead() || !target->Is3DLoaded()) {
+			if (!target || !target->Is3DLoaded()) {
+				it = g_approaches.erase(it);
+				continue;
+			}
+			if (target->IsDead()) {
+				if (!target->IsEssential()) {
+					g_sheatheAfterCombat = Settings::Get().sheathe;
+					logger::info("issen: {:08X} died during approach, dismembering (rule '{}')", target->GetFormID(), it->rule->name);
+					Dismember(player, target, *it->rule);
+				}
 				it = g_approaches.erase(it);
 				continue;
 			}
@@ -1151,14 +1275,15 @@ namespace issen::game::executor
 		const bool hitFrame = g_hitFrames.load(std::memory_order_relaxed) != g_hitFramesAtBegin;
 		for (auto it = g_strikes.begin(); it != g_strikes.end();) {
 			it->delay -= dt;
-			const bool due = it->delay <= 0.0f || (it->onHitFrame && hitFrame);
+			auto*      target = ActorOf(it->target);
+			const bool dead = target && target->IsDead();
+			const bool due = it->delay <= 0.0f || (it->onHitFrame && hitFrame) || dead;
 			if (!due) {
 				++it;
 				continue;
 			}
-			DevLog("issen: strike {}", it->onHitFrame && hitFrame ? "on HitFrame" : "on the timer");
-			auto* target = ActorOf(it->target);
-			if (target && !target->IsDead() && target->Is3DLoaded()) {
+			DevLog("issen: strike {}", dead ? "on early target death" : (it->onHitFrame && hitFrame ? "on HitFrame" : "on the timer"));
+			if (target && target->Is3DLoaded()) {
 				Strike(player, target, *it->rule);
 			}
 			it = g_strikes.erase(it);
@@ -1234,6 +1359,7 @@ namespace issen::game::executor
 		g_strikes.clear();
 		g_approaches.clear();
 		g_deaths.clear();
+		g_sideEffectWatches.clear();
 		g_sheatheAfterCombat = false;
 		g_outOfCombat = 0.0f;
 		g_lock = false;

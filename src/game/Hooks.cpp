@@ -52,6 +52,9 @@ namespace issen::game::hooks
 				hit->totalDamage = g_pendingHit->damage;
 				hit->percentBlocked = 0.0f;
 				hit->flags.reset(RE::HitData::Flag::kBlocked, RE::HitData::Flag::kBlockWithWeapon, RE::HitData::Flag::kBlockCandidate);
+				if (g_pendingHit->damage <= 0.0f) {
+					hit->flags.reset(RE::HitData::Flag::kFatal, RE::HitData::Flag::kDismemberLimb, RE::HitData::Flag::kExplodeLimb);
+				}
 			}
 			if (hit && victim && victim->IsPlayerRef() && OnEnemyHit(ActorOf(hit->aggressor), ImpactSource::Vanilla, hit)) {
 				return;  // answered by an issen: the hit never lands (RDF and DF, hooked inside this one, do not see it)
