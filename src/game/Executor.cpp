@@ -145,6 +145,7 @@ namespace issen::game::executor
 			const rules::Rule* rule;
 			float              timeLeft;
 			StrikeCut          cut{ StrikeCut::AnyFromPool };
+			bool               deferredKill{ false };  // left to its script in a deferred kill (see InDeferredKill)
 		};
 		constexpr float              kSideEffectWatchTime = 1.5f;
 		std::vector<SideEffectWatch> g_sideEffectWatches;
@@ -1038,7 +1039,7 @@ namespace issen::game::executor
 					logger::info("issen: {:08X} is in a deferred kill (health {:.0f}): left to its script, dismembered only if it dies",
 						target->GetFormID(), av->GetActorValue(RE::ActorValue::kHealth));
 					SetDoomed(d.target, false);
-					g_sideEffectWatches.push_back({ d.target, d.rule, kDeferredKillWatchTime, d.cut });
+					g_sideEffectWatches.push_back({ d.target, d.rule, kDeferredKillWatchTime, d.cut, true });
 					it = g_deaths.erase(it);
 					continue;
 				}
@@ -1074,6 +1075,14 @@ namespace issen::game::executor
 				}
 				it->timeLeft -= dt;
 				if (it->timeLeft <= 0.0f) {
+					if (it->deferredKill && target->AsActorValueOwner()->GetActorValue(RE::ActorValue::kHealth) > 0.0f) {
+						// Got up again: STB's draugr script kneels it (bleedOutStart) and stands it up (bleedOutStop) through
+						// PlayIdle, and that stand-up idle is sometimes refused, leaving it kneeling for good. A graph not in
+						// the bleedout state ignores the event.
+						const bool taken = target->NotifyAnimationGraph("bleedOutStop");
+						logger::info("issen: {:08X} got up from its deferred kill{}", target->GetFormID(),
+							taken ? " (was still kneeling: stood up)" : "");
+					}
 					it = g_sideEffectWatches.erase(it);
 					continue;
 				}
