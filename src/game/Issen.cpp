@@ -89,6 +89,28 @@ namespace issen::game
 			return attack >= RE::ATTACK_STATE_ENUM::kDraw && attack <= RE::ATTACK_STATE_ENUM::kBash;
 		}
 
+		// The strike is the right hand's: at the moment the issen fires it must hold a melee weapon (fists only with
+		// bUnarmed). Bows, crossbows, staffs, spells and a weapon swapped out since the press give no issen.
+		// Empty when it does, else why not.
+		std::string StrikeWeaponBlocked(RE::PlayerCharacter* player)
+		{
+			const auto* form = player ? player->GetEquippedObject(false) : nullptr;
+			if (!form) {
+				return Settings::Get().unarmed ? std::string{} : std::string{ "fists in the right hand ([Input] bUnarmed off)" };
+			}
+			const auto* weapon = form->As<RE::TESObjectWEAP>();
+			if (!weapon) {
+				return std::format("the right hand holds no weapon ({})", ToUtf8(form->GetName()));
+			}
+			if (weapon->IsHandToHandMelee()) {
+				return Settings::Get().unarmed ? std::string{} : std::string{ "fists in the right hand ([Input] bUnarmed off)" };
+			}
+			if (!weapon->IsMelee()) {
+				return std::format("the right hand holds a ranged weapon or a staff ({})", ToUtf8(weapon->GetName()));
+			}
+			return {};
+		}
+
 		// [Cost] what an issen of this kind costs the player right now.
 		float StaminaCost(RE::PlayerCharacter* player, rules::Kind kind)
 		{
@@ -251,6 +273,10 @@ namespace issen::game
 				logger::info("issen (perfect dodge) vs {} not fired: {}", Describe(ref.get()), e.blocked);
 				return;
 			}
+			if (const auto why = StrikeWeaponBlocked(RE::PlayerCharacter::GetSingleton()); !why.empty()) {
+				logger::info("issen (perfect dodge) vs {} not fired: {}", Describe(ref.get()), why);
+				return;
+			}
 			logger::info("ISSEN (perfect dodge) vs {}: press {:.3f}s after the dodge, distance {:.0f}, angle {:.0f}, rule '{}'",
 				Describe(ref.get()), verdict.delta, geometry.distance, geometry.angle, e.rule->name);
 			if (Settings::Get().execute) {
@@ -275,7 +301,10 @@ namespace issen::game
 			return false;
 		}
 		const auto    geometry = Measure(player, attacker, rules::Kind::Normal);
-		const auto    eligibility = Check(attacker, geometry, rules::Kind::Normal);
+		auto          eligibility = Check(attacker, geometry, rules::Kind::Normal);
+		if (eligibility.blocked.empty()) {
+			eligibility.blocked = StrikeWeaponBlocked(player);  // before the detector: a refused swing is not marked as an issen
+		}
 		ImpactVerdict verdict;
 		double        now = 0.0;
 		std::uint64_t frame = 0;
