@@ -40,7 +40,7 @@ SKSE-плагин для **Skyrim Special Edition 1.5.97**: исэн в духе
 ### Необязательные (без каждого пропадает только своя часть)
 | Мод | Что даёт | Без него |
 |---|---|---|
-| Reactive Dodge Framework | исэн после идеального уклонения, отскок перед исэном | только обычный исэн, рывок без отскока |
+| [Reactive Dodge Framework](https://github.com/Newrite/ReactiveDodgeFramework) | исэн после идеального уклонения, отскок перед исэном | только обычный исэн, рывок без отскока |
 | [Dismembering Framework](https://www.nexusmods.com/skyrimspecialedition/mods/126203) **и его пакеты ассетов** (гуманоиды, существа) | расчленение | враги просто умирают |
 | [Precision](https://www.nexusmods.com/skyrimspecialedition/mods/72347) | точный момент удара врага (по столкновению оружия) | момент удара берётся из игрового попадания |
 | GhostTrails | призраки вдоль рывка | рывок без призраков |
@@ -55,7 +55,8 @@ SKSE-плагин для **Skyrim Special Edition 1.5.97**: исэн в духе
 ## Установка (Mod Organizer 2)
 
 1. Установи обязательные моды и те необязательные, что хочешь.
-2. Установи архив **IssenFramework** как обычный мод и включи его. ESP у него нет.
+2. Скачай `IssenFramework-<версия>.zip` со страницы [Releases](../../releases) (или собери сам, см. «Сборка и
+   развёртывание») и установи как обычный мод, затем включи его. ESP у него нет.
 3. **Dismembering Framework**: обязательно поставь оба пакета ассетов, для гуманоидов и для существ. Без них DF ничего
    не отрубает. Проверка: в `Documents\My Games\Skyrim Special Edition\SKSE\DismemberingFramework.log` должны быть
    строки `Parsing JSON Limbs` и `Parsing JSON Data`.
@@ -238,19 +239,60 @@ FormID в примере — ванильные перки одноручног�
 
 ---
 
-## Сборка из исходников
+## Сборка и развёртывание
 
-- **Нужно**: Visual Studio 2022 (MSVC, C++23), [xmake](https://xmake.io) 3.0+,
-  [CommonLibSSE-NG](https://github.com/alandtse/CommonLibVR/tree/ng) рядом, в `../CommonLibSSE-NG`.
-- **Собрать**:
+### Зависимости сборки
+| | Версия | Откуда |
+|---|---|---|
+| Windows 10/11 x64, Visual Studio 2022 (MSVC, C++23, «Desktop development with C++») | 17.10+ | visualstudio.microsoft.com |
+| [xmake](https://xmake.io) | 3.0.8+ | `winget install xmake` |
+| [CommonLibSSE-NG](https://github.com/alandtse/CommonLibVR/tree/ng) | `896f6d0` (14.1.0, ветка `ng`) | submodule `extern/CommonLibSSE-NG` |
+| [glaze](https://github.com/stephenberry/glaze) | 7.0.2 | скачивается xmake сам (xrepo) |
+
+Заголовки API необязательных модов (Reactive Dodge Framework, Dismembering Framework, Precision, GhostTrails, FLICK)
+и ImGui уже лежат в `src/`: сами моды для сборки не нужны.
+
+### Сборка
+```
+git clone --recursive https://github.com/Newrite/IssenFramework.git
+cd IssenFramework
+xmake build -y                                     # DLL и тесты (режим releasedbg)
+build\windows\x64\releasedbg\issen_tests.exe       # тесты детектора и правил
+xmake pack                                         # архив мода: build\IssenFramework-<версия>.zip
+```
+CommonLibSSE-NG приходит submodule'ом, закреплённым на проверенном коммите. Если репозиторий склонирован без
+`--recursive`, догрузи его: `git submodule update --init --recursive`. Чтобы собрать со своей копией CommonLib, задай
+путь к ней в переменной окружения `COMMONLIBSSE_NG_PATH`. Первая сборка дольше: xmake собирает CommonLib и качает
+пакеты.
+
+Обновить CommonLib: `git -C extern/CommonLibSSE-NG fetch`, `git -C extern/CommonLibSSE-NG checkout <коммит>`, собрать,
+прогнать тесты и закоммитить новый указатель submodule.
+
+### Развёртывание
+- **Архивом.** `xmake pack` кладёт в `build\` архив с раскладкой `SKSE/Plugins/...`. Его можно поставить через MO2
+  или Vortex и выложить в Releases.
+- **Сразу в мод MO2 после каждой сборки.** Один раз укажи папку `SKSE\Plugins` мода:
   ```
-  xmake build -y                                     # DLL и тесты
-  build\windows\x64\releasedbg\issen_tests.exe       # тесты детектора и правил
+  xmake f -m releasedbg --deploy_dir="C:/MO2/mods/IssenFramework/SKSE/Plugins"
   ```
-- После сборки DLL, ini (только если его ещё нет) и правила копируются в мод MO2: путь `deploy_dir` в `xmake.lua`.
-- **Устройство исходников**:
-  - `src/core` — логика без движка, с тестами: окно исэна и правила по врагам;
-  - `src/game` — хуки, исполнение, меню.
+  После каждой сборки туда копируются DLL, PDB и правила по умолчанию (`IssenFramework\Rules\IssenDefault.json`).
+  `IssenFramework.ini` копируется **только если его там ещё нет**: сохранённые из меню настройки не затираются. Если
+  игра запущена, DLL занята и не копируется, сборка при этом не падает (будет предупреждение).
+
+Что лежит в моде:
+```
+SKSE/Plugins/IssenFramework.dll
+SKSE/Plugins/IssenFramework.ini
+SKSE/Plugins/IssenFramework/Rules/*.json
+```
+
+### Устройство исходников
+- `src/core` — логика без движка, с тестами: окно исэна и правила по врагам;
+- `src/game` — хуки, исполнение, меню;
+- `src/third_party`, `src/game/*API.h` — заголовки API других модов;
+- `dist/` — ini и правила по умолчанию;
+- `tests/` — тесты `src/core`;
+- `extern/CommonLibSSE-NG` — submodule CommonLib.
 
 ---
 
@@ -284,9 +326,13 @@ power attack, Onimusha's delayed death and Dismembering Framework cuts (head aft
 otherwise).
 
 - **Required**: SKSE64 and Address Library for 1.5.97.
+- **Install**: the zip from Releases, as a regular mod (no ESP).
 - **Optional**: Reactive Dodge Framework, Dismembering Framework with its humanoid and creature asset packs,
   Precision, GhostTrails, separated Slash Effects X, FLICK. Each one only adds its own part.
 - **Settings**: in the FLICK menu (F7 → "Исэн"), in `SKSE\Plugins\IssenFramework.ini`, and per enemy in
   `SKSE\Plugins\IssenFramework\Rules\*.json`.
 - **Log**: `Documents\My Games\Skyrim Special Edition\SKSE\IssenFramework.log`.
+- **Build**: VS 2022 + xmake 3.0.8+; `git clone --recursive` (CommonLibSSE-NG is a submodule, or set
+  `COMMONLIBSSE_NG_PATH`); `xmake build -y`, `xmake pack` for the mod zip, `xmake f --deploy_dir=...` to copy each build
+  into a mod folder.
 - **License**: GPL-3.0 (see [LICENSE](LICENSE)).
