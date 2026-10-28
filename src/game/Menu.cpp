@@ -115,6 +115,9 @@ namespace issen::game::menu
 				F(Page::Window, "Окно исэна", "Window", "fSameSwing", "Один взмах (с)",
 					"Два сообщения об ударе одного врага так близко — это один взмах (Precision и игра).", 0.0f, 1.0f,
 					ISSEN_F(detector.sameSwing)),
+				B(Page::Window, "Окно исэна", "Cue", "bEnabled", "Свечение для проведения исэна",
+					"Вспышка/блик на оружии или теле врага перед ударом и после идеального уклонения (подробности на вкладке «Эффекты»).",
+					ISSEN_F(cueEnabled)),
 				F(Page::Window, "Условия", "Conditions", "fMaxDistance", "Дальность", "Враг не дальше стольких единиц.", 0.0f, 1000.0f,
 					ISSEN_F(maxDistance), "%.0f"),
 				F(Page::Window, "Условия", "Conditions", "fMaxAngle", "Угол (°)", "Враг не дальше стольких градусов от взгляда.", 0.0f, 180.0f,
@@ -201,6 +204,30 @@ namespace issen::game::menu
 				F(Page::Time, "Камера", "Camera", "fZoomOut", "Отъезд (с)", "", 0.0f, 2.0f, ISSEN_F(zoomOut)),
 
 				// ---- effects
+				B(Page::Effects, "Свечение для исэна", "Cue", "bEnabled", "Свечение для проведения исэна",
+					"Вкл. = вспышка/свечение на враге, когда открывается окно для исэна.", ISSEN_F(cueEnabled)),
+				B(Page::Effects, "Свечение для исэна", "Cue", "bOnSwing", "При замахе врага",
+					"Свечение прямо перед попаданием удара врага (обычное окно исэна).", ISSEN_F(cueOnSwing)),
+				B(Page::Effects, "Свечение для исэна", "Cue", "bOnPerfectDodge", "После идеального уклонения",
+					"Свечение при открытии окна исэна после идеального уклонения RDF.", ISSEN_F(cueOnPerfectDodge)),
+				B(Page::Effects, "Свечение для исэна", "Cue", "bOnWeapon", "На оружии врага",
+					"Вспышка на оружии/щите/руке врага; если оружия нет — на узле тела ниже.", ISSEN_F(cueOnWeapon)),
+				T(Page::Effects, "Свечение для исэна", "Cue", "sNode", "Запасной узел на теле",
+					"Узел на теле врага, если у него нет оружия или «На оружии врага» выключено.", ISSEN_F(cueNode)),
+				T(Page::Effects, "Свечение для исэна", "Cue", "sVfx", "Эффекты вспышки (NIF)",
+					"\"путь масштаб крен наклон\" через запятую; nif-эффекты блика в точке сигнала.", ISSEN_F(cueVfx)),
+				F(Page::Effects, "Свечение для исэна", "Cue", "fVfxLifetime", "Длительность вспышки (с)", "", 0.05f, 3.0f,
+					ISSEN_F(cueVfxLifetime)),
+				T(Page::Effects, "Свечение для исэна", "Cue", "sShader", "Шейдер свечения врага",
+					"Plugin.esp|0xFormID EffectShader на враге; пусто = только NIF-вспышка.", ISSEN_F(cueShader)),
+				F(Page::Effects, "Свечение для исэна", "Cue", "fShaderDuration", "Длительность шейдера (с)", "", 0.05f, 3.0f,
+					ISSEN_F(cueShaderDuration)),
+				T(Page::Effects, "Свечение для исэна", "Cue", "sArt", "ArtObject на враге",
+					"Путь к .nif (внутри meshes\\), прикрепляемому к врагу; пусто = выкл.", ISSEN_F(cueArt)),
+				F(Page::Effects, "Свечение для исэна", "Cue", "fArtDuration", "Длительность ArtObject (с)", "", 0.05f, 3.0f,
+					ISSEN_F(cueArtDuration)),
+				T(Page::Effects, "Свечение для исэна", "Cue", "sSound", "Звук сигнала",
+					"Plugin.esp|0xFormID звука при появлении окна исэна; пусто = без звука.", ISSEN_F(cueSound)),
 				F(Page::Effects, "Вспышка и звук", "Effects", "fFlashStrength", "Сила вспышки", "", 0.0f, 1.0f, ISSEN_F(flashStrength)),
 				T(Page::Effects, "Вспышка и звук", "Effects", "sFlashImod", "Вспышка", "Plugin.esp|0xFormID модификатора изображения.",
 					ISSEN_F(flashImod)),
@@ -404,7 +431,10 @@ namespace issen::game::menu
 						FUCK::SeparatorText(group);
 					}
 					// The damage numbers only count with "damage from this menu" on: greyed out otherwise.
-					const bool inactive = page_ == Page::Damage && std::strcmp(f.key, "bGlobal") != 0 && !state.Draft().damageGlobal;
+					// Similarly, Cue sub-options are greyed out when the Cue checkbox is off.
+					const bool inactiveDamage = page_ == Page::Damage && std::strcmp(f.key, "bGlobal") != 0 && !state.Draft().damageGlobal;
+					const bool inactiveCue = std::strcmp(f.section, "Cue") == 0 && std::strcmp(f.key, "bEnabled") != 0 && !state.Draft().cueEnabled;
+					const bool inactive = inactiveDamage || inactiveCue;
 					FUCK::PushID(f.section);
 					FUCK::PushID(f.key);
 					if (inactive) {
@@ -483,7 +513,7 @@ namespace issen::game::menu
 					"Урон исэна и пороги ваншота и добивания. Без «Урон из этого меню» действуют числа правил (Rules\\*.json)." },
 				{ Page::Strike, "Удар и смерть", ICON_FA_KHANDA, "Анимация удара, расчленение и отложенная смерть." },
 				{ Page::Time, "Время и камера", ICON_FA_HOURGLASS_HALF, "Замедление, кадр-стоп, наезд камеры, цвет." },
-				{ Page::Effects, "Эффекты", ICON_FA_WAND_MAGIC_SPARKLES, "Вспышка, звуки и эффекты слэша." },
+				{ Page::Effects, "Эффекты", ICON_FA_WAND_MAGIC_SPARKLES, "Свечение для исэна, вспышка, звуки и эффекты слэша." },
 				{ Page::Dash, "Рывок и призраки", ICON_FA_PERSON_RUNNING, "Отскок, рывок к врагу и призрачный след." },
 				{ Page::Debug, "Отладка", ICON_FA_BUG, nullptr },
 			};

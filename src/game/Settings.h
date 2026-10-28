@@ -124,6 +124,20 @@ namespace issen::game
 		std::string strikeVfx{ "effects\\impacteffects\\AP05\\ssex_StandardSlash.nif 2.6 0 90, effects\\impacteffects\\AP05\\ssex_specialslash.nif 1.8 0 90, effects\\impacteffects\\AP05\\ssex_SparksSlash.nif 1.0 0, effects\\impacteffects\\AP05\\ssex_SlashImpact.nif 1.0 0, effects\\impacteffects\\AP05\\ssex_Sparks.nif 1.0 0, effects\\impacteffects\\AP05\\ssex_RingOfFire.nif 1.0 0, effects\\impacteffects\\AP05\\ssex_Glow.nif 1.0 0" };
 		float       strikeVfxLifetime{ 1.5f };
 
+		// [Cue] telegraph flash / glint on the enemy when an issen window opens
+		bool        cueEnabled{ true };
+		bool        cueOnSwing{ true };         // flash during the enemy's swing right before the hit
+		bool        cueOnPerfectDodge{ true };  // flash when the perfect-dodge issen window opens
+		bool        cueOnWeapon{ true };        // place on the enemy's weapon node (falls back to cueNode when unarmed)
+		std::string cueNode{ "NPC Spine2 [Spn2]" };
+		std::string cueVfx{ "effects\\impacteffects\\AP05\\ssex_Glow.nif 1.2 0 0, effects\\impacteffects\\AP05\\ssex_Sparks.nif 0.8 0 0" };
+		float       cueVfxLifetime{ 0.35f };
+		std::string cueArt{ "" };
+		float       cueArtDuration{ 0.35f };
+		std::string cueShader{ "" };
+		float       cueShaderDuration{ 0.35f };
+		std::string cueSound{ "" };
+
 		// [Compat]
 		bool        usePrecision{ true };
 		bool        perfectDodge{ true };

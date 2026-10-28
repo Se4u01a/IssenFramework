@@ -7,6 +7,8 @@
 
 #include <cmath>
 #include <mutex>
+#include <unordered_map>
+#include <vector>
 
 namespace issen::game
 {
@@ -28,6 +30,44 @@ namespace issen::game
 		{
 			return ref ? ref->GetHandle().native_handle() : 0;
 		}
+
+		RE::Actor* ActorOf(std::uint32_t handle)
+		{
+			const auto ref = RE::TESObjectREFR::LookupByHandle(handle);
+			return ref ? ref->As<RE::Actor>() : nullptr;
+		}
+
+		// ---- enemy swing cue (preHitFrame / weaponSwing graph events + kSwing state transitions)
+		std::mutex                 g_swingCueLock;
+		std::vector<std::uint32_t> g_swingCueEvents;
+
+		class EnemySwingSink final : public RE::BSTEventSink<RE::BSAnimationGraphEvent>
+		{
+		public:
+			RE::BSEventNotifyControl ProcessEvent(const RE::BSAnimationGraphEvent* e, RE::BSTEventSource<RE::BSAnimationGraphEvent>*) override
+			{
+				if (!e || !e->holder) {
+					return RE::BSEventNotifyControl::kContinue;
+				}
+				const char* tag = e->tag.c_str();
+				if (_stricmp(tag, "preHitFrame") == 0 || _stricmp(tag, "weaponSwing") == 0 || _stricmp(tag, "weaponLeftSwing") == 0) {
+					const auto handle = HandleOf(const_cast<RE::TESObjectREFR*>(e->holder));
+					if (handle != 0) {
+						std::scoped_lock lock(g_swingCueLock);
+						g_swingCueEvents.push_back(handle);
+					}
+				}
+				return RE::BSEventNotifyControl::kContinue;
+			}
+		};
+		EnemySwingSink g_enemySwingSink;
+
+		struct WatchedEnemy
+		{
+			RE::ATTACK_STATE_ENUM prevState{ RE::ATTACK_STATE_ENUM::kNone };
+			bool                  seenThisTick{ false };
+		};
+		std::unordered_map<std::uint32_t, WatchedEnemy> g_watchedEnemies;
 
 		const char* HandName(Hand hand)
 		{
@@ -106,7 +146,7 @@ namespace issen::game
 				return Settings::Get().unarmed ? std::string{} : std::string{ "fists in the right hand ([Input] bUnarmed off)" };
 			}
 			if (!weapon->IsMelee()) {
-				return std::format("the right hand holds a ranged weapon or a staff ({})", ToUtf8(weapon->GetName()));
+				return std::format("the right hand holds a ranged weapon or a staff ({})", ToUtf8(form->GetName()));
 			}
 			return {};
 		}
@@ -203,6 +243,79 @@ namespace issen::game
 			}
 			return e;
 		}
+
+		void TrySwingCue(RE::PlayerCharacter* player, RE::Actor* attacker)
+		{
+			const auto& s = Settings::Get();
+			if (!player || !attacker || attacker == player || attacker->IsDead() || !attacker->Is3DLoaded() || !attacker->IsInCombat()) {
+				return;
+			}
+			const auto* playerState = player->AsActorState();
+			if (!playerState || !playerState->IsWeaponDrawn() || !StrikeWeaponBlocked(player).empty()) {
+				return;
+			}
+			// Allow a small forward lunge margin during the swing wind-up so the cue still flashes if the enemy steps into range.
+			Geometry g = Measure(player, attacker, rules::Kind::Normal);
+			g.ok = g.distance <= s.maxDistance + 60.0f && g.angle <= s.maxAngle + 15.0f;
+			if (Check(attacker, g, rules::Kind::Normal).blocked.empty()) {
+				executor::Cue(attacker, rules::Kind::Normal);
+			}
+		}
+
+		void UpdateSwingCues()
+		{
+			const auto& s = Settings::Get();
+			std::vector<std::uint32_t> events;
+			{
+				std::scoped_lock lock(g_swingCueLock);
+				events.swap(g_swingCueEvents);
+			}
+			if (!s.cueEnabled || !s.cueOnSwing) {
+				g_watchedEnemies.clear();
+				return;
+			}
+			auto* player = RE::PlayerCharacter::GetSingleton();
+			auto* lists = RE::ProcessLists::GetSingleton();
+			if (!player || !lists) {
+				return;
+			}
+			for (auto& [_, w] : g_watchedEnemies) {
+				w.seenThisTick = false;
+			}
+			const float watchRange = s.maxDistance + 150.0f;
+			for (const auto& actorHandle : lists->highActorHandles) {
+				const auto ptr = actorHandle.get();
+				auto*      actor = ptr ? ptr.get() : nullptr;
+				if (!actor || actor == player || actor->IsDead() || !actor->Is3DLoaded() || !actor->IsInCombat()) {
+					continue;
+				}
+				if (player->GetPosition().GetDistance(actor->GetPosition()) > watchRange) {
+					continue;
+				}
+				const auto h = actorHandle.native_handle();
+				auto [it, inserted] = g_watchedEnemies.try_emplace(h);
+				if (inserted) {
+					actor->AddAnimationGraphEventSink(&g_enemySwingSink);
+				}
+				it->second.seenThisTick = true;
+				const auto* state = actor->AsActorState();
+				const auto  attack = state ? state->GetAttackState() : RE::ATTACK_STATE_ENUM::kNone;
+				const auto  prev = it->second.prevState;
+				it->second.prevState = attack;
+				const bool enteredSwing = (attack == RE::ATTACK_STATE_ENUM::kSwing || attack == RE::ATTACK_STATE_ENUM::kBash) &&
+				                          prev != RE::ATTACK_STATE_ENUM::kSwing && prev != RE::ATTACK_STATE_ENUM::kBash;
+				if (enteredSwing) {
+					TrySwingCue(player, actor);
+				}
+			}
+			std::erase_if(g_watchedEnemies, [](const auto& kv) { return !kv.second.seenThisTick; });
+
+			for (const auto h : events) {
+				if (auto* actor = ActorOf(h)) {
+					TrySwingCue(player, actor);
+				}
+			}
+		}
 	}
 
 	void Configure()
@@ -222,6 +335,7 @@ namespace issen::game
 			g_clock.Advance(dt);
 			g_detector.Expire(g_clock.Now());
 		}
+		UpdateSwingCues();
 		executor::Update(dt);
 	}
 
@@ -239,6 +353,11 @@ namespace issen::game
 			std::scoped_lock lock(g_lock);
 			g_detector.Reset();
 		}
+		{
+			std::scoped_lock lock(g_swingCueLock);
+			g_swingCueEvents.clear();
+		}
+		g_watchedEnemies.clear();
 		executor::Reset();
 		logger::info("session start: detector reset");
 	}
@@ -371,7 +490,15 @@ namespace issen::game
 			now = g_clock.Now();
 			g_detector.OnPerfectDodge(now, HandleOf(attacker));
 		}
+		const auto& s = Settings::Get();
 		DevLog("perfect dodge against {} at t={:.3f}: issen window {:.2f}s open", Describe(attacker), now,
-			Settings::Get().detector.perfectWindow);
+			s.detector.perfectWindow);
+		if (s.cueEnabled && s.cueOnPerfectDodge && attacker) {
+			auto*      player = RE::PlayerCharacter::GetSingleton();
+			const auto geometry = Measure(player, attacker, rules::Kind::PerfectDodge);
+			if (Check(attacker, geometry, rules::Kind::PerfectDodge).blocked.empty() && StrikeWeaponBlocked(player).empty()) {
+				executor::Cue(attacker, rules::Kind::PerfectDodge);
+			}
+		}
 	}
 }

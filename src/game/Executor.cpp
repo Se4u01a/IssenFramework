@@ -29,6 +29,19 @@ namespace issen::game::executor
 			const rules::Rule* rule;
 		};
 
+		struct CueRequest
+		{
+			std::uint32_t target;
+			rules::Kind   kind;
+		};
+
+		struct CueCooldown
+		{
+			std::uint32_t target;
+			rules::Kind   kind;
+			float         left;
+		};
+
 		struct Strike
 		{
 			std::uint32_t      target;
@@ -67,9 +80,11 @@ namespace issen::game::executor
 		bool  g_speedRestore{ false }; // write the normal speed back once
 		float g_speedDelta{ 0.0f };    // our temporary WeaponSpeedMult modifier on the player (taken off before a save)
 
-		std::mutex           g_requestLock;
-		std::vector<Request> g_requests;  // any thread -> main thread
-		std::vector<Strike>  g_strikes;   // main thread
+		std::mutex              g_requestLock;
+		std::vector<Request>    g_requests;     // any thread -> main thread
+		std::vector<CueRequest> g_cueRequests;  // any thread -> main thread
+		std::vector<CueCooldown> g_cueCooldowns; // main thread
+		std::vector<Strike>     g_strikes;      // main thread
 
 		// The part before the strike (main thread).
 		enum class Phase : std::uint8_t
@@ -171,8 +186,12 @@ namespace issen::game::executor
 			float       roll{ 0.0f };   // radians, about the swing's forward axis
 			float       pitch{ 0.0f };  // radians, about its side axis (lays a slash facing you flat)
 		};
-		std::vector<Vfx> g_strikeVfx;
-		bool                        g_dfBound{ false };
+		std::vector<Vfx>               g_strikeVfx;
+		std::vector<Vfx>               g_cueVfx;
+		std::vector<RE::BGSArtObject*> g_cueArt;
+		RE::TESEffectShader*           g_cueShader{ nullptr };
+		RE::BGSSoundDescriptorForm*    g_cueSound{ nullptr };
+		bool                           g_dfBound{ false };
 
 		std::mt19937 g_rng{ std::random_device{}() };
 
@@ -606,6 +625,82 @@ namespace issen::game::executor
 					}
 				}
 			}
+		}
+
+		RE::NiPoint3 CuePosition(RE::Actor* target, const Settings& s)
+		{
+			RE::NiPoint3 at = target->GetPosition();
+			at.z += 90.0f;
+			auto* root = target->Get3D();
+			if (!root) {
+				return at;
+			}
+			if (s.cueOnWeapon) {
+				if (target->GetEquippedObject(false)) {
+					if (auto* node = root->GetObjectByName("WEAPON")) {
+						return node->world.translate;
+					}
+					if (auto* node = root->GetObjectByName("NPC R Hand [RHnd]")) {
+						return node->world.translate;
+					}
+				} else if (target->GetEquippedObject(true)) {
+					if (auto* node = root->GetObjectByName("SHIELD")) {
+						return node->world.translate;
+					}
+					if (auto* node = root->GetObjectByName("NPC L Hand [LHnd]")) {
+						return node->world.translate;
+					}
+				}
+			}
+			if (!s.cueNode.empty()) {
+				if (auto* node = root->GetObjectByName(s.cueNode)) {
+					return node->world.translate;
+				}
+			}
+			if (auto* node = root->GetObjectByName("NPC Spine2 [Spn2]")) {
+				return node->world.translate;
+			}
+			if (auto* node = root->GetObjectByName("NPC COM [COM ]")) {
+				return node->world.translate;
+			}
+			return at;
+		}
+
+		void PlayCue(RE::PlayerCharacter* player, RE::Actor* target, rules::Kind kind)
+		{
+			const auto& s = Settings::Get();
+			if (!s.cueEnabled) {
+				return;
+			}
+			const auto handle = HandleOf(target);
+			for (const auto& cd : g_cueCooldowns) {
+				if (cd.target == handle && cd.kind == kind) {
+					return;
+				}
+			}
+			g_cueCooldowns.push_back({ handle, kind, std::max(s.detector.sameSwing, 0.35f) });
+
+			if (g_cueShader && s.cueShaderDuration > 0.0f) {
+				target->ApplyEffectShader(g_cueShader, s.cueShaderDuration);
+			}
+			for (auto* art : g_cueArt) {
+				if (s.cueArtDuration > 0.0f) {
+					target->ApplyArtObject(art, s.cueArtDuration);
+				}
+			}
+			PlaySound(g_cueSound, target);
+			if (auto* cell = target->GetParentCell(); cell && !g_cueVfx.empty()) {
+				const auto  at = CuePosition(target, s);
+				const float yaw = player->GetAngleZ();
+				for (const auto& v : g_cueVfx) {
+					const auto  rot = SwingRotation(yaw, v.pitch, v.roll);
+					const auto* fx = RE::BSTempEffectParticle::Spawn(cell, s.cueVfxLifetime, v.model.c_str(), rot, at, v.scale, 7, nullptr);
+					if (!fx) {
+						DevLog("issen: cue effect '{}' could not be spawned", v.model);
+					}
+				}
+			}
+			DevLog("issen: cue ({}) on {:08X}", kind == rules::Kind::PerfectDodge ? "perfect dodge" : "swing", target->GetFormID());
 		}
 
 		void FaceTarget(RE::PlayerCharacter* player, RE::Actor* target)
@@ -1148,6 +1243,10 @@ namespace issen::game::executor
 		g_strikeImpacts = LookupAll<RE::BGSImpactDataSet>(s.strikeImpacts, "[Effects] sStrikeImpacts");
 		g_strikeArt = MakeArt(s.strikeArt);
 		g_strikeVfx = ParseVfx(s.strikeVfx);
+		g_cueVfx = ParseVfx(s.cueVfx);
+		g_cueArt = MakeArt(s.cueArt);
+		g_cueShader = s.cueShader.empty() ? nullptr : LookupFirst<RE::TESEffectShader>(s.cueShader, "[Cue] sShader");
+		g_cueSound = s.cueSound.empty() ? nullptr : LookupFirst<RE::BGSSoundDescriptorForm>(s.cueSound, "[Cue] sSound");
 		g_vanishShader = s.vanishShader.empty() ? nullptr : LookupFirst<RE::TESEffectShader>(s.vanishShader, "[Approach] sVanishShader");
 		g_appearShader = s.appearShader.empty() ? nullptr : LookupFirst<RE::TESEffectShader>(s.appearShader, "[Approach] sAppearShader");
 		g_vanishArt = s.vanishArt.empty() ? nullptr : LookupFirst<RE::BGSArtObject>(s.vanishArt, "[Approach] sVanishArt");
@@ -1171,8 +1270,9 @@ namespace issen::game::executor
 		logger::info("approach: back step {}, vanish shader {}, appear shader {}, vanish art {}, appear art {}",
 			g_rdfDodge ? "through Reactive Dodge Framework" : "off (Reactive Dodge Framework not loaded)", g_vanishShader ? "ok" : "off",
 			g_appearShader ? "ok" : "off", g_vanishArt ? "ok" : "off", g_appearArt ? "ok" : "off");
-		logger::info("effects: flash {}, strike sound {}, slow sound {}, {} impact set(s), {} art effect(s), {} world effect(s)", g_flash ? "ok" : "off",
-			g_strikeSound ? "ok" : "off", g_slowSound ? "ok" : "off", g_strikeImpacts.size(), g_strikeArt.size(), g_strikeVfx.size());
+		logger::info("effects: flash {}, strike sound {}, slow sound {}, {} impact set(s), {} art effect(s), {} world effect(s), cue {} ({} vfx)",
+			g_flash ? "ok" : "off", g_strikeSound ? "ok" : "off", g_slowSound ? "ok" : "off", g_strikeImpacts.size(), g_strikeArt.size(),
+			g_strikeVfx.size(), s.cueEnabled ? "on" : "off", g_cueVfx.size());
 	}
 
 	void BindDismembering()
@@ -1197,6 +1297,15 @@ namespace issen::game::executor
 		g_requests.push_back({ HandleOf(target), kind, rule });
 	}
 
+	void Cue(RE::Actor* target, rules::Kind kind)
+	{
+		if (!target) {
+			return;
+		}
+		std::scoped_lock lock(g_requestLock);
+		g_cueRequests.push_back({ HandleOf(target), kind });
+	}
+
 	void Update(float dt)
 	{
 		const bool issen = !g_strikes.empty() || !g_approaches.empty() || !g_deaths.empty();
@@ -1205,14 +1314,27 @@ namespace issen::game::executor
 		grade::Update(slow::g_active ? slow::g_k : 0.0f);
 		ghost::Update(dt);
 
-		std::vector<Request> requests;
+		std::erase_if(g_cueCooldowns, [dt](CueCooldown& cd) {
+			cd.left -= dt;
+			return cd.left <= 0.0f;
+		});
+
+		std::vector<Request>    requests;
+		std::vector<CueRequest> cues;
 		{
 			std::scoped_lock lock(g_requestLock);
 			requests.swap(g_requests);
+			cues.swap(g_cueRequests);
 		}
 		auto* player = RE::PlayerCharacter::GetSingleton();
 		if (!player) {
 			return;
+		}
+		for (const auto& c : cues) {
+			auto* target = ActorOf(c.target);
+			if (target && !target->IsDead() && target->Is3DLoaded()) {
+				PlayCue(player, target, c.kind);
+			}
 		}
 		for (const auto& r : requests) {
 			auto* target = ActorOf(r.target);
@@ -1355,7 +1477,9 @@ namespace issen::game::executor
 		{
 			std::scoped_lock lock(g_requestLock);
 			g_requests.clear();
+			g_cueRequests.clear();
 		}
+		g_cueCooldowns.clear();
 		g_strikes.clear();
 		g_approaches.clear();
 		g_deaths.clear();

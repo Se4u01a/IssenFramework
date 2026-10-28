@@ -13,6 +13,9 @@ namespace issen::game::executor
 	// next player tick: slow motion, flash and sound at once, the kill / damage after [Execute] fStrikeDelay.
 	void Trigger(RE::Actor* target, rules::Kind kind, const rules::Rule* rule);
 
+	// Any thread: plays the telegraph glint / glow on `target` when an issen window opens.
+	void Cue(RE::Actor* target, rules::Kind kind);
+
 	// Main thread, every player tick; `dt` is the player's frame time. PostUpdate runs after the game's own player
 	// update (the game writes the attack speed graph variable there).
 	void Update(float dt);

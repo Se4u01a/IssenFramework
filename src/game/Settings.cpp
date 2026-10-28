@@ -195,6 +195,19 @@ namespace issen::game
 		s.strikeVfx = ReadString("Effects", "sStrikeVfx", s.strikeVfx);
 		s.strikeVfxLifetime = ReadFloat("Effects", "fStrikeVfxLifetime", s.strikeVfxLifetime, 0.1f, 10.0f);
 
+		s.cueEnabled = ReadBool("Cue", "bEnabled", s.cueEnabled);
+		s.cueOnSwing = ReadBool("Cue", "bOnSwing", s.cueOnSwing);
+		s.cueOnPerfectDodge = ReadBool("Cue", "bOnPerfectDodge", s.cueOnPerfectDodge);
+		s.cueOnWeapon = ReadBool("Cue", "bOnWeapon", s.cueOnWeapon);
+		s.cueNode = ReadString("Cue", "sNode", s.cueNode);
+		s.cueVfx = ReadString("Cue", "sVfx", s.cueVfx);
+		s.cueVfxLifetime = ReadFloat("Cue", "fVfxLifetime", s.cueVfxLifetime, 0.05f, 10.0f);
+		s.cueArt = ReadString("Cue", "sArt", s.cueArt);
+		s.cueArtDuration = ReadFloat("Cue", "fArtDuration", s.cueArtDuration, 0.0f, 10.0f);
+		s.cueShader = ReadString("Cue", "sShader", s.cueShader);
+		s.cueShaderDuration = ReadFloat("Cue", "fShaderDuration", s.cueShaderDuration, 0.0f, 10.0f);
+		s.cueSound = ReadString("Cue", "sSound", s.cueSound);
+
 		s.usePrecision = ReadBool("Compat", "bUsePrecision", s.usePrecision);
 		s.perfectDodge = ReadBool("Compat", "bPerfectDodge", s.perfectDodge);
 		s.realHit = ReadBool("Compat", "bRealHit", s.realHit);
@@ -206,9 +219,9 @@ namespace issen::game
 		s.devLog = ReadBool("Dev", "bDevLog", s.devLog);
 
 		g_settings = std::move(s);
-		logger::info("settings: execute={} strikeDelay={:.2f}s slow world x{:.2f} player x{:.2f} hold {:.2f}s flash '{}' sounds '{}' '{}'",
+		logger::info("settings: execute={} strikeDelay={:.2f}s slow world x{:.2f} player x{:.2f} hold {:.2f}s flash '{}' sounds '{}' '{}' cue={}",
 			g_settings.execute, g_settings.strikeDelay, g_settings.slowWorld, g_settings.slowPlayer, g_settings.slowHold,
-			g_settings.flashImod, g_settings.strikeSound, g_settings.slowSound);
+			g_settings.flashImod, g_settings.strikeSound, g_settings.slowSound, g_settings.cueEnabled);
 		logger::info("settings: window={:.3f}s perfectDodgeWindow={:.3f}s early/late log {:.2f}/{:.2f}s sameSwing={:.2f}s "
 					 "leftHand={} unarmed={} extra keys kb/mouse/pad {}/{}/{} precision={} perfectDodge={} ('{}') devLog={}",
 			d.window, d.perfectWindow, d.earlyLog, d.lateLog, d.sameSwing, g_settings.leftHand, g_settings.unarmed,
